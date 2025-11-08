@@ -606,7 +606,19 @@ class NetworkMonitorApp:
         self.ax.set_ylim(-0.1, 1.1)
         self.ax.set_yticks([0, 1])
         self.ax.set_yticklabels(["Down", "Up"])
-        leg = self.ax.legend(loc="upper left", ncol=2, framealpha=0.7)
+        # Move legend outside plot area (right side)
+        leg = self.ax.legend(
+            loc="center left",
+            bbox_to_anchor=(1.02, 0.5),
+            borderaxespad=0,
+            framealpha=0.7,      # semi-transparent background
+            ncol=1,              # single column (avoid overlap)
+            title="Connections"
+        )
+        
+        # Make space on the right for legend
+        self.fig.subplots_adjust(right=0.8)
+
         self.ax.set_title(f"Connection history ({len(self.internal_hops)} internal hop(s))")
         self.ax.set_xlabel("Time")
         self.ax.set_ylabel("Status (Up/Down)")
