@@ -345,7 +345,14 @@ class NetworkMonitorApp:
 
         # Slider (matplotlib) — add an axis below the plot
         self.slider_ax = self.fig.add_axes([0.12, 0.02, 0.76, 0.03])  # [left, bottom, width, height] in figure coords
-        self.time_slider = Slider(self.slider_ax, "Time", 0.0, 1.0, valinit=1.0)
+        self.time_slider = Slider(
+            self.slider_ax,
+            "Offset (min)",
+            -float(DEFAULT_WINDOW_MIN),
+            0.0,
+            valinit=0.0,
+            valfmt="%0.1f min",
+        )
         self.time_slider.on_changed(self.on_slider_changed)
 
         # Data containers
@@ -626,10 +633,10 @@ class NetworkMonitorApp:
     # ---------- Plot & Slider ----------
     def update_slider_range(self):
         # Called when window minutes changes
-        self.canvas.draw_idle()
+        self.update_plot()
 
     def on_slider_changed(self, val):
-        # Slider value is 0..1 (fraction of available history)
+        # Slider value represents minute offset relative to latest measurement (<= 0)
         self.update_plot()
 
     def update_plot(self):
@@ -647,17 +654,47 @@ class NetworkMonitorApp:
         t_all = list(self.timestamps)
         t_min = t_all[0]
         t_max = t_all[-1]
-        total_span = (t_max - t_min).total_seconds()
-        if total_span <= 0:
-            total_span = 1
+        # Update slider range to match available history (expressed in minutes)
+        slider_min_minutes = min(
+            0.0,
+            ((t_min + window_delta) - t_max).total_seconds() / 60.0,
+        )
 
-        # Slider val 0..1 maps to start time between [t_min, t_max - window]
-        frac = self.time_slider.val  # 0..1
-        start_time = t_min + datetime.timedelta(seconds=frac * max(0, total_span))
-        # ensure window stays within [t_min, t_max]
-        if start_time + window_delta > t_max:
-            start_time = max(t_min, t_max - window_delta)
+        if (
+            getattr(self.time_slider, "valmin", None) is None
+            or self.time_slider.valmin != slider_min_minutes
+            or self.time_slider.valmax != 0.0
+        ):
+            self.time_slider.valmin = slider_min_minutes
+            self.time_slider.valmax = 0.0
+            self.time_slider.ax.set_xlim(slider_min_minutes, 0.0)
+
+        current_val = self.time_slider.val
+        clamped_val = min(max(current_val, slider_min_minutes), 0.0)
+        if clamped_val != current_val:
+            # set_val triggers update_plot; guard to avoid recursion loops
+            self.time_slider.set_val(clamped_val)
+            return
+
+        # Slider value (in minutes) shifts the end of the visible window relative to the latest point
+        offset_minutes = self.time_slider.val
+        end_time = t_max + datetime.timedelta(minutes=offset_minutes)
+
+        # Ensure end_time within available data range
+        if end_time > t_max:
+            end_time = t_max
+        if end_time < t_min:
+            end_time = t_min
+
+        start_time = max(t_min, end_time - window_delta)
         end_time = start_time + window_delta
+        if end_time > t_max:
+            end_time = t_max
+            start_time = max(t_min, end_time - window_delta)
+
+        # Update slider value text to match clamped value
+        if hasattr(self.time_slider, "valtext"):
+            self.time_slider.valtext.set_text(f"{self.time_slider.val:.1f} min")
 
         # Build x series (matplotlib expects numbers; but we can plot raw datetime if using autofmt)
         # We'll filter data within [start_time, end_time]
