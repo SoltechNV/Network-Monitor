@@ -39,8 +39,8 @@ DEFAULT_FAST_RETRY_SEC = 2    # temporary faster retry when any hop is down
 DEFAULT_WINDOW_MIN = 60       # time window shown when using the slider (minutes)
 HISTORY_HOURS = 24            # keep at most 24h of data in memory
 
-LOG_TXT = "network_log.txt"
-LOG_CSV = "network_log.csv"
+LOG_BASENAME = "network_log"
+LOG_DIR = os.path.dirname(os.path.abspath(__file__))
 TRACEROUTE_TIMEOUT = 25
 DEFAULT_INTERNET_FALLBACK = "1.1.1.1"
 
@@ -367,8 +367,8 @@ class NetworkMonitorApp:
         self.start_time = now_ts()
         self.total_measurements = 0
 
-        # CSV header init after discovering hops
-        self.csv_initialized = False
+        # Initialize log file paths (TXT + CSV will be timestamped)
+        self.start_new_log_files()
 
         # Connection type
         self.conn_type = detect_connection_type()
@@ -385,6 +385,9 @@ class NetworkMonitorApp:
 
         # Initialize CSV header
         self.init_csv_header()
+        self.append_gui(
+            f"Log files → {os.path.basename(self.log_txt_path)}, {os.path.basename(self.log_csv_path)}"
+        )
 
         # Initialize statistics label
         self.update_stats_label()
@@ -424,10 +427,25 @@ class NetworkMonitorApp:
         except Exception as e:
             print(f"⚠️ Could not save settings: {e}")
 
-    
+
     # ---------- CSV ----------
+    def start_new_log_files(self):
+        """Create fresh TXT/CSV log file paths using a timestamp."""
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        self.current_log_timestamp = timestamp
+        self.log_txt_path = os.path.join(LOG_DIR, f"{LOG_BASENAME}_{timestamp}.txt")
+        self.log_csv_path = os.path.join(LOG_DIR, f"{LOG_BASENAME}_{timestamp}.csv")
+        self.csv_initialized = False
+        try:
+            with open(self.log_txt_path, "w", encoding="utf-8") as f:
+                f.write("")
+        except Exception as e:
+            print(f"⚠️ Could not initialize log file {self.log_txt_path}: {e}")
+        else:
+            print(f"📝 Logging to {os.path.basename(self.log_txt_path)} and {os.path.basename(self.log_csv_path)}")
+
     def init_csv_header(self):
-        with open(LOG_CSV, "w", newline="", encoding="utf-8") as f:
+        with open(self.log_csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["timestamp"] + self.internal_hops + ["Internet", "fail_count", "status"])
         self.csv_initialized = True
@@ -464,22 +482,28 @@ class NetworkMonitorApp:
         self.textbox.delete("1.0", tk.END)
         self.textbox.configure(state="disabled")
 
-        # Remove log files
-        for path in (LOG_TXT, LOG_CSV):
+        # Remove current log files
+        for path in (getattr(self, "log_txt_path", None), getattr(self, "log_csv_path", None)):
+            if not path:
+                continue
             try:
                 if os.path.exists(path):
                     os.remove(path)
             except Exception as e:
                 print(f"⚠️ Could not remove {path}: {e}")
 
+        # Start fresh log files
+        self.start_new_log_files()
+
         # Re-detect route targets
         self.internal_hops, self.internet_ip = detect_route()
         self.history = {ip: deque() for ip in self.internal_hops}
 
-        # Recreate CSV header and empty TXT file
-        self.csv_initialized = False
+        # Recreate CSV header for the new log files
         self.init_csv_header()
-        open(LOG_TXT, "w", encoding="utf-8").close()
+        self.append_gui(
+            f"Log files → {os.path.basename(self.log_txt_path)}, {os.path.basename(self.log_csv_path)}"
+        )
 
         # Reset slider and plot
         try:
@@ -619,12 +643,12 @@ class NetworkMonitorApp:
         parts = [f"{ip}:{'True' if ok else 'False'}" for ip, ok in hop_results]
         line = f"[{human}] " + " | ".join(parts) + f" | Internet:{internet_ok} | fails:{fail_count} → {status}"
         # TXT
-        with open(LOG_TXT, "a", encoding="utf-8") as f:
+        with open(self.log_txt_path, "a", encoding="utf-8") as f:
             f.write(line + "\n")
         # CSV
         if not self.csv_initialized:
             self.init_csv_header()
-        with open(LOG_CSV, "a", newline="", encoding="utf-8") as f:
+        with open(self.log_csv_path, "a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             row = [human] + [ok for _, ok in hop_results] + [internet_ok, fail_count, status]
             writer.writerow(row)
