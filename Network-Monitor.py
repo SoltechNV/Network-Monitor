@@ -637,16 +637,16 @@ class NetworkMonitorApp:
 
         import signal, sys
 
-        def safe_exit(app, root):
-            """Gracefully stop background thread and close the GUI."""
-            try:
-                app.running = False
-                root.quit()
-                root.destroy()
-                print("👋 Exiting Network Monitor cleanly.")
-                sys.exit(0)
-            except Exception:
-                sys.exit(0)
+    def safe_exit(app, root):
+        """Gracefully stop background thread and close the GUI."""
+        try:
+            app.running = False
+            root.quit()
+            root.destroy()
+            print("👋 Exiting Network Monitor cleanly.")
+            sys.exit(0)
+        except Exception:
+            sys.exit(0)
 
 
 def main():
