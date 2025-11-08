@@ -572,7 +572,13 @@ class NetworkMonitorApp:
         self.ax.set_title(f"Connection history ({len(self.internal_hops)} internal hop(s))")
         self.ax.set_xlabel("Time")
         self.ax.set_ylabel("Status (Up/Down)")
+        import matplotlib.dates as mdates
+
+        # Format x-axis time display
+        self.ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+        self.ax.xaxis.set_minor_formatter(mdates.DateFormatter('%d/%m\n%H:%M'))
         self.fig.autofmt_xdate(rotation=45)
+
 
         # Set x-limits to selected window
         self.ax.set_xlim(start_time, end_time)
