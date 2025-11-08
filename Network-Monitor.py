@@ -271,6 +271,7 @@ class NetworkMonitorApp:
         # State
         self.paused = False
         self.running = True
+        self._after_jobs = []
 
         # Settings (tk variables)
         self.var_interval = tk.IntVar(value=DEFAULT_INTERVAL_SEC)
@@ -639,12 +640,29 @@ def safe_exit(app, root):
     """Gracefully stop background thread and close the GUI."""
     try:
         app.running = False
+
+        # Cancel any pending Tkinter events safely
+        try:
+            for job in getattr(app, "_after_jobs", []):
+                root.after_cancel(job)
+        except Exception:
+            pass
+
+        # Try to stop Matplotlib redraw loops cleanly
+        try:
+            if hasattr(app, "canvas"):
+                app.canvas.stop_event_loop()
+        except Exception:
+            pass
+
+        # Final cleanup and exit
         root.quit()
         root.destroy()
         print("👋 Exiting Network Monitor cleanly.")
         sys.exit(0)
     except Exception:
         sys.exit(0)
+
 
 
 def main():
