@@ -297,6 +297,9 @@ class NetworkMonitorApp:
         self.pause_btn = ttk.Button(btn_frame, text="⏸ Pause", command=self.toggle_pause)
         self.pause_btn.pack(side="left", padx=(0,8))
 
+        self.reset_btn = ttk.Button(btn_frame, text="🔄 Reset", command=self.reset_monitor)
+        self.reset_btn.pack(side="left", padx=(0,8))
+
         self.export_btn = ttk.Button(btn_frame, text="📸 Export Graph to PNG", command=self.export_graph)
         self.export_btn.pack(side="left")
 
@@ -416,6 +419,65 @@ class NetworkMonitorApp:
         self.paused = not self.paused
         self.pause_btn.config(text="▶ Resume" if self.paused else "⏸ Pause")
         self.append_gui("⏸ Monitoring paused" if self.paused else "▶ Monitoring resumed")
+
+    def reset_monitor(self):
+        if not messagebox.askyesno(
+            "Reset Monitor",
+            "This will clear the history, logs, and restart monitoring. Continue?",
+        ):
+            return
+
+        # Pause monitoring loop while we reset state
+        self.paused = True
+        self.pause_btn.config(text="▶ Resume")
+        self.status_label.config(text="Resetting monitor...", foreground="blue")
+        self.root.update_idletasks()
+
+        # Give the monitor loop a moment to acknowledge pause
+        time.sleep(0.1)
+
+        # Clear in-memory history
+        self.timestamps = deque()
+        for series in self.history.values():
+            series.clear()
+        self.internet_series = deque()
+
+        # Clear GUI log
+        self.textbox.configure(state="normal")
+        self.textbox.delete("1.0", tk.END)
+        self.textbox.configure(state="disabled")
+
+        # Remove log files
+        for path in (LOG_TXT, LOG_CSV):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception as e:
+                print(f"⚠️ Could not remove {path}: {e}")
+
+        # Re-detect route targets
+        self.internal_hops, self.internet_ip = detect_route()
+        self.history = {ip: deque() for ip in self.internal_hops}
+
+        # Recreate CSV header and empty TXT file
+        self.csv_initialized = False
+        self.init_csv_header()
+        open(LOG_TXT, "w", encoding="utf-8").close()
+
+        # Reset slider and plot
+        try:
+            self.time_slider.reset()
+        except Exception:
+            self.time_slider.set_val(1.0)
+        self.update_plot()
+
+        # Update status and resume monitoring
+        targets_msg = f"Targets → {', '.join(self.internal_hops)} → Internet={self.internet_ip}"
+        self.append_gui(targets_msg)
+        self.status_label.config(text="Monitoring...", foreground="black")
+        self.paused = False
+        self.pause_btn.config(text="⏸ Pause")
+        self.append_gui("🔄 Monitor reset — monitoring restarted", "blue")
 
     # ---------- Export PNG ----------
     def export_graph(self):
