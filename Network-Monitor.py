@@ -653,21 +653,21 @@ def main():
     root = tk.Tk()
     app = NetworkMonitorApp(root)
 
-    # Graceful exit when closing window
     def on_close():
         app.save_settings()
         safe_exit(app, root)
 
-
     root.protocol("WM_DELETE_WINDOW", on_close)
 
-    # Handle Ctrl+C interrupt safely
-    signal.signal(signal.SIGINT, lambda sig, frame: safe_exit(app, root))
+    # Handle Ctrl+C safely
+    signal.signal(signal.SIGINT, lambda *_: safe_exit(app, root))
 
     try:
         root.mainloop()
     except KeyboardInterrupt:
         safe_exit(app, root)
 
+
 if __name__ == "__main__":
     main()
+
