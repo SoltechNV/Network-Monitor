@@ -285,14 +285,8 @@ class NetworkMonitorApp:
         top_frame = ttk.Frame(root)
         top_frame.pack(fill="x", padx=10, pady=(10,5))
 
-        status_container = ttk.Frame(top_frame)
-        status_container.pack(side="left")
-
-        self.stats_label = ttk.Label(status_container, text="", font=("Segoe UI", 9))
-        self.stats_label.pack(anchor="w")
-
-        self.status_label = ttk.Label(status_container, text="Initializing...", font=("Segoe UI", 13))
-        self.status_label.pack(anchor="w")
+        self.status_label = ttk.Label(top_frame, text="Initializing...", font=("Segoe UI", 13))
+        self.status_label.pack(side="left")
 
         self.conn_type_label = ttk.Label(top_frame, text="", font=("Segoe UI", 10))
         self.conn_type_label.pack(side="left", padx=(12,0))
@@ -357,8 +351,6 @@ class NetworkMonitorApp:
         self.hop_colors = ["tab:blue", "tab:orange", "tab:purple", "tab:brown",
                            "tab:pink", "tab:gray", "tab:olive", "tab:cyan"]
         self.internet_color = "skyblue"  # dashed
-        self.start_time = now_ts()
-        self.total_measurements = 0
 
         # CSV header init after discovering hops
         self.csv_initialized = False
@@ -378,9 +370,6 @@ class NetworkMonitorApp:
 
         # Initialize CSV header
         self.init_csv_header()
-
-        # Initialize statistics label
-        self.update_stats_label()
 
         # Start monitor thread
         threading.Thread(target=self.monitor_loop, daemon=True).start()
@@ -451,6 +440,7 @@ class NetworkMonitorApp:
         self.timestamps = deque()
         for series in self.history.values():
             series.clear()
+        self.internet_series = deque()
 
         # Clear GUI log
         self.textbox.configure(state="normal")
@@ -485,10 +475,6 @@ class NetworkMonitorApp:
         targets_msg = f"Targets → {', '.join(self.internal_hops)} → Internet={self.internet_ip}"
         self.append_gui(targets_msg)
         self.status_label.config(text="Monitoring...", foreground="black")
-        self.start_time = now_ts()
-        self.total_measurements = 0
-        self.internet_series = deque()
-        self.update_stats_label()
         self.paused = False
         self.pause_btn.config(text="⏸ Pause")
         self.append_gui("🔄 Monitor reset — monitoring restarted", "blue")
@@ -560,8 +546,6 @@ class NetworkMonitorApp:
                 self.history[ip].append(1 if ok else 0)
             self.internet_series.append(1 if internet_ok else 0)
             self.prune_history()
-            self.total_measurements += 1
-            self.update_stats_label()
 
             # Classify
             status, color = self.classify(hop_results, internet_ok)
@@ -713,46 +697,6 @@ class NetworkMonitorApp:
         self.ax.set_xlim(start_time, end_time)
 
         self.canvas.draw_idle()
-
-    def format_elapsed(self, delta):
-        seconds = max(0, int(delta.total_seconds()))
-        hours, remainder = divmod(seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        parts = []
-        if hours:
-            parts.append(f"{hours}h")
-        if minutes or hours:
-            parts.append(f"{minutes}m")
-        parts.append(f"{seconds}s")
-        return " ".join(parts)
-
-    def update_stats_label(self):
-        elapsed = now_ts() - self.start_time if hasattr(self, "start_time") and self.start_time else datetime.timedelta(0)
-        elapsed_str = self.format_elapsed(elapsed)
-        lines = [f"Metingen: {self.total_measurements} | Tijd: {elapsed_str}"]
-
-        def pct_text(up_count, total_count):
-            if total_count <= 0:
-                return "0.0% up / 0.0% down"
-            up_pct = (up_count / total_count) * 100
-            down_pct = 100 - up_pct
-            return f"{up_pct:.1f}% up / {down_pct:.1f}% down"
-
-        for idx, ip in enumerate(self.internal_hops, start=1):
-            series = self.history.get(ip, [])
-            total = len(series)
-            up = sum(series) if total else 0
-            lines.append(f"Hop {idx} ({ip}): {pct_text(up, total)}")
-
-        total_inet = len(self.internet_series)
-        up_inet = sum(self.internet_series) if total_inet else 0
-        lines.append(f"Internet ({self.internet_ip}): {pct_text(up_inet, total_inet)}")
-
-        self.stats_label.config(text="\n".join(lines))
-        try:
-            self.root.update_idletasks()
-        except Exception:
-            pass
 
 def safe_exit(app, root):
     """Gracefully stop background thread and close the GUI."""
