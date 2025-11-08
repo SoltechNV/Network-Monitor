@@ -53,7 +53,7 @@ pip install matplotlib
 2. **Run the tool:**
 
    ```bash
-   python network_monitor_v3_5.py
+   python network-monitor.py
    ```
 
 3. The GUI will:
