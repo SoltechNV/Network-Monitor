@@ -27,6 +27,8 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.widgets import Slider
 import json
+import signal
+
 SETTINGS_FILE = "network_monitor_settings.json"
 
 # ---------------- Configuration defaults (user-changeable in GUI) ---------------
