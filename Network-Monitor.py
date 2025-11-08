@@ -26,6 +26,8 @@ matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.widgets import Slider
+import json
+SETTINGS_FILE = "network_monitor_settings.json"
 
 # ---------------- Configuration defaults (user-changeable in GUI) ---------------
 DEFAULT_INTERVAL_SEC = 10     # normal sampling interval
@@ -274,6 +276,7 @@ class NetworkMonitorApp:
         self.var_timeout = tk.IntVar(value=DEFAULT_TIMEOUT_SEC)
         self.var_fast_retry = tk.IntVar(value=DEFAULT_FAST_RETRY_SEC)
         self.var_window_min = tk.IntVar(value=DEFAULT_WINDOW_MIN)
+        self.load_settings()
 
         # Header: status + connection type + buttons
         top_frame = ttk.Frame(root)
@@ -365,6 +368,39 @@ class NetworkMonitorApp:
         # Start monitor thread
         threading.Thread(target=self.monitor_loop, daemon=True).start()
 
+    # ---------- Settings persistence ----------
+    def load_settings(self):
+        """Load saved user settings from JSON file."""
+        if os.path.exists(SETTINGS_FILE):
+            try:
+                with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self.var_interval.set(data.get("interval", self.var_interval.get()))
+                self.var_attempts.set(data.get("attempts", self.var_attempts.get()))
+                self.var_timeout.set(data.get("timeout", self.var_timeout.get()))
+                self.var_fast_retry.set(data.get("fast_retry", self.var_fast_retry.get()))
+                self.var_window_min.set(data.get("window_min", self.var_window_min.get()))
+                print("⚙️ Settings loaded from file.")
+            except Exception as e:
+                print(f"⚠️ Could not load settings: {e}")
+    
+    def save_settings(self):
+        """Save current settings to JSON file."""
+        data = {
+            "interval": self.var_interval.get(),
+            "attempts": self.var_attempts.get(),
+            "timeout": self.var_timeout.get(),
+            "fast_retry": self.var_fast_retry.get(),
+            "window_min": self.var_window_min.get(),
+        }
+        try:
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            print("💾 Settings saved.")
+        except Exception as e:
+            print(f"⚠️ Could not save settings: {e}")
+
+    
     # ---------- CSV ----------
     def init_csv_header(self):
         with open(LOG_CSV, "w", newline="", encoding="utf-8") as f:
@@ -605,7 +641,9 @@ def main():
 
     # Graceful exit when closing window
     def on_close():
+        app.save_settings()
         safe_exit(app, root)
+
 
     root.protocol("WM_DELETE_WINDOW", on_close)
 
