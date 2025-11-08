@@ -638,31 +638,34 @@ class NetworkMonitorApp:
 
 def safe_exit(app, root):
     """Gracefully stop background thread and close the GUI."""
+    if not getattr(app, "running", False):
+        return  # already shutting down
+
+    app.running = False
+    print("👋 Exiting Network Monitor cleanly.")
+
     try:
-        app.running = False
-
-        # Cancel any pending Tkinter events safely
-        try:
-            for job in getattr(app, "_after_jobs", []):
+        # Cancel pending after() jobs if any
+        for job in getattr(app, "_after_jobs", []):
+            try:
                 root.after_cancel(job)
-        except Exception:
-            pass
+            except Exception:
+                pass
 
-        # Try to stop Matplotlib redraw loops cleanly
-        try:
-            if hasattr(app, "canvas"):
-                app.canvas.stop_event_loop()
-        except Exception:
-            pass
+        # Stop the GUI event loop safely
+        if root.winfo_exists():
+            root.quit()
+            root.update_idletasks()
+            root.destroy()
 
-        # Final cleanup and exit
-        root.quit()
-        root.destroy()
-        print("👋 Exiting Network Monitor cleanly.")
-        sys.exit(0)
     except Exception:
-        sys.exit(0)
+        pass
 
+    # Ensure Python process ends even if Tkinter thread lingers
+    try:
+        sys.exit(0)
+    except SystemExit:
+        os._exit(0)
 
 
 def main():
@@ -670,19 +673,21 @@ def main():
     app = NetworkMonitorApp(root)
 
     def on_close():
-        app.save_settings()
-        safe_exit(app, root)
+        try:
+            app.save_settings()
+        except Exception:
+            pass
+        # Call safe_exit asynchronously to avoid “invalid command name” after WM_DELETE
+        root.after(50, lambda: safe_exit(app, root))
 
     root.protocol("WM_DELETE_WINDOW", on_close)
 
-    # Handle Ctrl+C safely
     signal.signal(signal.SIGINT, lambda *_: safe_exit(app, root))
 
     try:
         root.mainloop()
     except KeyboardInterrupt:
         safe_exit(app, root)
-
 
 if __name__ == "__main__":
     main()
