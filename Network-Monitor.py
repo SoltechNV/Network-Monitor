@@ -585,11 +585,37 @@ class NetworkMonitorApp:
 
         self.canvas.draw_idle()
 
+        import signal, sys
+
+        def safe_exit(app, root):
+            """Gracefully stop background thread and close the GUI."""
+            try:
+                app.running = False
+                root.quit()
+                root.destroy()
+                print("👋 Exiting Network Monitor cleanly.")
+                sys.exit(0)
+            except Exception:
+                sys.exit(0)
+
+
 def main():
     root = tk.Tk()
     app = NetworkMonitorApp(root)
-    root.protocol("WM_DELETE_WINDOW", lambda: setattr(app, "running", False) or root.destroy())
-    root.mainloop()
+
+    # Graceful exit when closing window
+    def on_close():
+        safe_exit(app, root)
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
+
+    # Handle Ctrl+C interrupt safely
+    signal.signal(signal.SIGINT, lambda sig, frame: safe_exit(app, root))
+
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        safe_exit(app, root)
 
 if __name__ == "__main__":
     main()
