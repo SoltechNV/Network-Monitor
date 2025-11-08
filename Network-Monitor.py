@@ -27,7 +27,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.widgets import Slider
 import json
-import signal
+import signal, sys
 
 SETTINGS_FILE = "network_monitor_settings.json"
 
@@ -634,8 +634,6 @@ class NetworkMonitorApp:
         self.ax.set_xlim(start_time, end_time)
 
         self.canvas.draw_idle()
-
-        import signal, sys
 
 def safe_exit(app, root):
     """Gracefully stop background thread and close the GUI."""
