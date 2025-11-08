@@ -73,10 +73,12 @@ pip install matplotlib
 ---
 
 ## 🗂️ Log Files
-- `network_log.txt` — human-readable event log  
-- `network_log.csv` — machine-readable data log for spreadsheets  
+- `network_log_YYYY-MM-DD_HH-MM-SS.txt` — human-readable event log
+- `network_log_YYYY-MM-DD_HH-MM-SS.csv` — machine-readable data log for spreadsheets
 
-Both files are created in the same directory as the script.
+Fresh log files are created in the same directory as the script every time the
+application starts, and again whenever you press the **🔄 Reset** button. This
+keeps each monitoring session neatly separated.
 
 ---
 
