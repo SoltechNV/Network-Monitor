@@ -382,6 +382,13 @@ class NetworkMonitorApp:
         plot_frame.pack(fill="both", expand=True, padx=10, pady=(0,6))
 
         self.fig, self.ax = plt.subplots(figsize=(10, 4))
+        # Reserve extra room underneath the main plot so the rotated time labels
+        # do not collide with the interactive slider that sits below the axes.
+        # (A slightly taller bottom margin also keeps the Matplotlib toolbar
+        # readable on high-DPI displays.)
+        default_bottom = getattr(self.fig.subplotpars, "bottom", 0.11)
+        self.figure_bottom_margin = max(default_bottom, 0.25)
+        self.fig.subplots_adjust(bottom=self.figure_bottom_margin)
         self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
         self.canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
 
@@ -399,7 +406,12 @@ class NetworkMonitorApp:
         self.next_page_btn.pack(side="left")
 
         # Slider (matplotlib) — add an axis below the plot
-        self.slider_ax = self.fig.add_axes([0.12, 0.02, 0.76, 0.03])  # [left, bottom, width, height] in figure coords
+        # Position the slider comfortably below the axes, leaving enough
+        # headroom for the "Time" label and tick text.
+        slider_height = 0.045
+        slider_gap = 0.035
+        slider_bottom = max(0.02, self.figure_bottom_margin - slider_height - slider_gap)
+        self.slider_ax = self.fig.add_axes([0.12, slider_bottom, 0.76, slider_height])  # [left, bottom, width, height] in figure coords
         self.time_slider = Slider(
             self.slider_ax,
             "Offset (min)",
@@ -1024,8 +1036,10 @@ class NetworkMonitorApp:
             title="Connections"
         )
         
-        # Make space on the right for legend
-        self.fig.subplots_adjust(right=0.8)
+        # Make space on the right for legend while keeping the enlarged bottom
+        # margin that separates the x-axis labels from the slider.
+        bottom_margin = getattr(self, "figure_bottom_margin", 0.11)
+        self.fig.subplots_adjust(right=0.8, bottom=bottom_margin)
 
         self.ax.set_title(f"Connection history ({len(self.internal_hops)} internal hop(s))")
         self.ax.set_xlabel("Time")
@@ -1064,7 +1078,7 @@ class NetworkMonitorApp:
     def update_stats_label(self):
         elapsed = now_ts() - self.start_time if hasattr(self, "start_time") and self.start_time else datetime.timedelta(0)
         elapsed_str = self.format_elapsed(elapsed)
-        lines = [f"Metingen: {self.total_measurements} | Tijd: {elapsed_str}"]
+        lines = [f"Measurements: {self.total_measurements} | Runtime: {elapsed_str}"]
 
         def pct_text(up_count, total_count):
             down_count = max(0, total_count - up_count)
