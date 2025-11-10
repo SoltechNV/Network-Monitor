@@ -279,6 +279,10 @@ class NetworkMonitorApp:
         self.var_timeout = tk.IntVar(value=DEFAULT_TIMEOUT_SEC)
         self.var_fast_retry = tk.IntVar(value=DEFAULT_FAST_RETRY_SEC)
         self.var_window_min = tk.IntVar(value=DEFAULT_WINDOW_MIN)
+        self.var_maintenance_frequency = tk.StringVar(value="Off")
+        self.var_maintenance_time = tk.StringVar(value="03:00")
+        self.var_maintenance_duration = tk.IntVar(value=10)
+        self.var_maintenance_weekday = tk.StringVar(value="Monday")
         self.load_settings()
 
         # Header: status + connection type + buttons
@@ -328,6 +332,46 @@ class NetworkMonitorApp:
         ttk.Label(settings, text="Window (min):").grid(row=0, column=8, sticky="w", padx=12, pady=4)
         ttk.Spinbox(settings, from_=1, to=1440, textvariable=self.var_window_min, width=6, command=self.update_slider_range).grid(row=0, column=9, sticky="w")
 
+        ttk.Label(settings, text="Maintenance:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        self.maintenance_mode_combo = ttk.Combobox(
+            settings,
+            values=["Off", "Daily", "Weekly"],
+            state="readonly",
+            width=8,
+            textvariable=self.var_maintenance_frequency,
+        )
+        self.maintenance_mode_combo.grid(row=1, column=1, sticky="w")
+        self.maintenance_mode_combo.bind("<<ComboboxSelected>>", lambda *_: self.update_maintenance_widgets())
+        self.maintenance_mode_combo.set(self.var_maintenance_frequency.get())
+
+        ttk.Label(settings, text="Start (HH:MM):").grid(row=1, column=2, sticky="w", padx=12, pady=4)
+        self.maintenance_time_entry = ttk.Entry(settings, textvariable=self.var_maintenance_time, width=8)
+        self.maintenance_time_entry.grid(row=1, column=3, sticky="w")
+
+        ttk.Label(settings, text="Duration (min):").grid(row=1, column=4, sticky="w", padx=12, pady=4)
+        self.maintenance_duration_spin = ttk.Spinbox(settings, from_=1, to=180, textvariable=self.var_maintenance_duration, width=6)
+        self.maintenance_duration_spin.grid(row=1, column=5, sticky="w")
+
+        ttk.Label(settings, text="Weekday:").grid(row=1, column=6, sticky="w", padx=12, pady=4)
+        self.weekday_options = [
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday",
+        ]
+        self.maintenance_weekday_combo = ttk.Combobox(
+            settings,
+            values=self.weekday_options,
+            state="readonly",
+            width=10,
+            textvariable=self.var_maintenance_weekday,
+        )
+        self.maintenance_weekday_combo.grid(row=1, column=7, sticky="w")
+        self.maintenance_weekday_combo.set(self.var_maintenance_weekday.get())
+
         # Log window
         self.textbox = scrolledtext.ScrolledText(root, height=12, width=160, state="disabled")
         self.textbox.pack(padx=10, pady=(6,10), fill="x")
@@ -359,6 +403,7 @@ class NetworkMonitorApp:
         self.timestamps = deque()  # store datetime objects
         self.history = {}          # ip -> deque of 0/1
         self.internet_series = deque()  # 0/1 for internet
+        self.problem_flags = deque()
         self.internal_hops = []
         self.internet_ip = DEFAULT_INTERNET_FALLBACK
         self.hop_colors = ["tab:blue", "tab:orange", "tab:purple", "tab:brown",
@@ -392,6 +437,10 @@ class NetworkMonitorApp:
         # Initialize statistics label
         self.update_stats_label()
 
+        self.problem_marker_artists = []
+        self.maintenance_active = False
+        self.update_maintenance_widgets()
+
         # Start monitor thread
         threading.Thread(target=self.monitor_loop, daemon=True).start()
 
@@ -407,6 +456,18 @@ class NetworkMonitorApp:
                 self.var_timeout.set(data.get("timeout", self.var_timeout.get()))
                 self.var_fast_retry.set(data.get("fast_retry", self.var_fast_retry.get()))
                 self.var_window_min.set(data.get("window_min", self.var_window_min.get()))
+                freq_val = data.get("maintenance_frequency", self.var_maintenance_frequency.get())
+                if isinstance(freq_val, str):
+                    freq_val = freq_val.capitalize()
+                if freq_val not in ("Off", "Daily", "Weekly"):
+                    freq_val = "Off"
+                self.var_maintenance_frequency.set(freq_val)
+                self.var_maintenance_time.set(data.get("maintenance_time", self.var_maintenance_time.get()))
+                self.var_maintenance_duration.set(data.get("maintenance_duration", self.var_maintenance_duration.get()))
+                weekday_val = data.get("maintenance_weekday", self.var_maintenance_weekday.get())
+                if weekday_val not in getattr(self, "weekday_options", []):
+                    weekday_val = "Monday"
+                self.var_maintenance_weekday.set(weekday_val)
                 print("⚙️ Settings loaded from file.")
             except Exception as e:
                 print(f"⚠️ Could not load settings: {e}")
@@ -419,6 +480,10 @@ class NetworkMonitorApp:
             "timeout": self.var_timeout.get(),
             "fast_retry": self.var_fast_retry.get(),
             "window_min": self.var_window_min.get(),
+            "maintenance_frequency": self.var_maintenance_frequency.get(),
+            "maintenance_time": self.var_maintenance_time.get(),
+            "maintenance_duration": self.var_maintenance_duration.get(),
+            "maintenance_weekday": self.var_maintenance_weekday.get(),
         }
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
@@ -426,6 +491,98 @@ class NetworkMonitorApp:
             print("💾 Settings saved.")
         except Exception as e:
             print(f"⚠️ Could not save settings: {e}")
+
+    def update_maintenance_widgets(self):
+        mode = self.var_maintenance_frequency.get()
+        weekly = (mode.lower() == "weekly")
+        try:
+            self.maintenance_weekday_combo.configure(state="readonly" if weekly else "disabled")
+        except Exception:
+            pass
+
+    def parse_maintenance_time(self):
+        try:
+            hour, minute = [int(x) for x in self.var_maintenance_time.get().strip().split(":", 1)]
+            if not (0 <= hour < 24 and 0 <= minute < 60):
+                raise ValueError
+            return hour, minute
+        except Exception:
+            return None
+
+    def is_in_maintenance(self, ref_ts=None):
+        mode = (self.var_maintenance_frequency.get() or "Off").lower()
+        if mode not in {"daily", "weekly"}:
+            return False
+
+        parsed = self.parse_maintenance_time()
+        if not parsed:
+            return False
+
+        if ref_ts is None:
+            ref_ts = now_ts()
+
+        hour, minute = parsed
+        duration_min = max(1, int(self.var_maintenance_duration.get() or 0))
+
+        start_candidate = ref_ts.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+        if mode == "daily":
+            if ref_ts < start_candidate:
+                start_candidate -= datetime.timedelta(days=1)
+        else:  # weekly
+            weekday_str = self.var_maintenance_weekday.get()
+            try:
+                target_weekday = self.weekday_options.index(weekday_str)
+            except ValueError:
+                target_weekday = 0
+            delta_days = (ref_ts.weekday() - target_weekday) % 7
+            start_candidate -= datetime.timedelta(days=delta_days)
+            if ref_ts < start_candidate:
+                start_candidate -= datetime.timedelta(days=7)
+
+        end_time = start_candidate + datetime.timedelta(minutes=duration_min)
+        return start_candidate <= ref_ts <= end_time
+
+    def handle_maintenance_state(self, ts):
+        active = self.is_in_maintenance(ts)
+        if active and not self.maintenance_active:
+            self.maintenance_active = True
+            self.append_gui("🛠 Maintenance window active — checks paused", "gray")
+        elif not active and self.maintenance_active:
+            self.maintenance_active = False
+            self.append_gui("✅ Maintenance window ended — monitoring resumed", "green")
+            self.status_label.config(text="Monitoring...", foreground="black")
+        return active
+
+    def clear_slider_markers(self):
+        for artist in getattr(self, "problem_marker_artists", []):
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        self.problem_marker_artists = []
+
+    def update_slider_markers(self, all_timestamps, latest_ts):
+        self.clear_slider_markers()
+        if not all_timestamps or not self.problem_flags:
+            self.slider_ax.figure.canvas.draw_idle()
+            return
+
+        offsets = []
+        for ts, flag in zip(all_timestamps, list(self.problem_flags)):
+            if flag:
+                offsets.append((ts - latest_ts).total_seconds() / 60.0)
+
+        if not offsets:
+            self.slider_ax.figure.canvas.draw_idle()
+            return
+
+        scatter = self.slider_ax.scatter(offsets, [0.5] * len(offsets), color="red", s=40, zorder=5, clip_on=False)
+        self.problem_marker_artists.append(scatter)
+        for offset in offsets:
+            line = self.slider_ax.axvline(offset, color="red", ymin=0.15, ymax=0.85, alpha=0.5, linewidth=1)
+            self.problem_marker_artists.append(line)
+        self.slider_ax.figure.canvas.draw_idle()
 
 
     # ---------- CSV ----------
@@ -476,6 +633,8 @@ class NetworkMonitorApp:
         self.timestamps = deque()
         for series in self.history.values():
             series.clear()
+        self.problem_flags = deque()
+        self.clear_slider_markers()
 
         # Clear GUI log
         self.textbox.configure(state="normal")
@@ -519,6 +678,8 @@ class NetworkMonitorApp:
         self.start_time = now_ts()
         self.total_measurements = 0
         self.internet_series = deque()
+        self.problem_flags = deque()
+        self.maintenance_active = False
         self.update_stats_label()
         self.paused = False
         self.pause_btn.config(text="⏸ Pause")
@@ -568,6 +729,10 @@ class NetworkMonitorApp:
 
             ts = now_ts()
 
+            if self.handle_maintenance_state(ts):
+                time.sleep(1.0)
+                continue
+
             # Ping internal hops
             hop_results = []
             any_down = False
@@ -590,6 +755,7 @@ class NetworkMonitorApp:
             for ip, ok in hop_results:
                 self.history[ip].append(1 if ok else 0)
             self.internet_series.append(1 if internet_ok else 0)
+            self.problem_flags.append(1 if any_down else 0)
             self.prune_history()
             self.total_measurements += 1
             self.update_stats_label()
@@ -623,6 +789,8 @@ class NetworkMonitorApp:
                     self.history[ip].popleft()
             if self.internet_series:
                 self.internet_series.popleft()
+            if self.problem_flags:
+                self.problem_flags.popleft()
 
     def classify(self, hop_results, internet_ok):
         all_internal_ok = all(ok for _, ok in hop_results)
@@ -778,6 +946,7 @@ class NetworkMonitorApp:
             x_right += pad
         self.ax.set_xlim(x_left, x_right)
 
+        self.update_slider_markers(t_all, t_max)
         self.canvas.draw_idle()
 
     def format_elapsed(self, delta):
