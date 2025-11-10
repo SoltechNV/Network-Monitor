@@ -414,14 +414,6 @@ class NetworkMonitorApp:
         plot_frame = ttk.Frame(root)
         plot_frame.pack(fill="both", expand=True, padx=10, pady=(0,6))
 
-        self.fig, self.ax = plt.subplots(figsize=(10, 4))
-        # Reserve extra room underneath the main plot so the rotated time labels
-        # do not collide with the interactive slider that sits below the axes.
-        # (A slightly taller bottom margin also keeps the Matplotlib toolbar
-        # readable on high-DPI displays.)
-        default_bottom = getattr(self.fig.subplotpars, "bottom", 0.11)
-        self.figure_bottom_margin = max(default_bottom, 0.25)
-        self.fig.subplots_adjust(bottom=self.figure_bottom_margin)
         self.fig, (self.ax_status, self.ax_latency) = plt.subplots(
             2,
             1,
@@ -429,6 +421,17 @@ class NetworkMonitorApp:
             sharex=True,
             gridspec_kw={"height_ratios": [1.2, 1]},
         )
+        # Reserve extra room underneath the latency chart so the time labels and
+        # the slider can both be shown without overlapping.  The additional
+        # padding also keeps the Matplotlib toolbar readable on high-DPI
+        # displays.
+        default_bottom = getattr(self.fig.subplotpars, "bottom", 0.11)
+        self.slider_height = 0.06
+        self.slider_gap = 0.03
+        self.slider_min_bottom = 0.025
+        min_bottom_needed = self.slider_min_bottom + self.slider_height + self.slider_gap + 0.05
+        self.figure_bottom_margin = max(default_bottom, min_bottom_needed)
+        self.fig.subplots_adjust(bottom=self.figure_bottom_margin, right=0.8, hspace=0.25)
         self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
         self.canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
 
@@ -448,10 +451,11 @@ class NetworkMonitorApp:
         # Slider (matplotlib) — add an axis below the plot
         # Position the slider comfortably below the axes, leaving enough
         # headroom for the "Time" label and tick text.
-        self.slider_height = 0.045
-        self.slider_gap = 0.035
-        axes_box = self.ax.get_position()
-        slider_bottom = max(0.02, axes_box.y0 - self.slider_height - self.slider_gap)
+        axes_box = self.ax_latency.get_position()
+        max_bottom = axes_box.y0 - self.slider_height - self.slider_gap
+        slider_bottom = self.slider_min_bottom
+        if max_bottom < slider_bottom:
+            slider_bottom = max(0.0, max_bottom)
         self.slider_ax = self.fig.add_axes([axes_box.x0, slider_bottom, axes_box.width, self.slider_height])  # [left, bottom, width, height] in figure coords
         self.time_slider = Slider(
             self.slider_ax,
@@ -1318,7 +1322,7 @@ class NetworkMonitorApp:
         # Make space on the right for legend while keeping the enlarged bottom
         # margin that separates the x-axis labels from the slider.
         bottom_margin = getattr(self, "figure_bottom_margin", 0.11)
-        self.fig.subplots_adjust(right=0.8, bottom=bottom_margin)
+        self.fig.subplots_adjust(right=0.8, bottom=bottom_margin, hspace=0.25)
         self.position_time_slider()
 
         self.fig.subplots_adjust(right=0.8, hspace=0.25)
@@ -1351,8 +1355,11 @@ class NetworkMonitorApp:
     def position_time_slider(self):
         if not hasattr(self, "slider_ax"):
             return
-        axes_box = self.ax.get_position()
-        slider_bottom = max(0.02, axes_box.y0 - self.slider_height - self.slider_gap)
+        axes_box = self.ax_latency.get_position()
+        max_bottom = axes_box.y0 - self.slider_height - self.slider_gap
+        slider_bottom = self.slider_min_bottom
+        if max_bottom < slider_bottom:
+            slider_bottom = max(0.0, max_bottom)
         self.slider_ax.set_position([axes_box.x0, slider_bottom, axes_box.width, self.slider_height])
 
     def format_elapsed(self, delta):
