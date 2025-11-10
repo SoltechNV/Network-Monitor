@@ -51,6 +51,159 @@ DEFAULT_INTERNET_FALLBACK = "1.1.1.1"
 
 IP_RE = re.compile(r"(\d+\.\d+\.\d+\.\d+)")
 
+LAN_PALETTE = {
+    "good": "#2ECC71",
+    "warning": "#F1C40F",
+    "degraded": "#E67E22",
+    "down": "#E74C3C",
+}
+
+ISP_PALETTE = {
+    "good": "#27AE60",
+    "warning": "#F39C12",
+    "degraded": "#E67E22",
+    "down": "#C0392B",
+}
+
+INTERNET_PALETTE = {
+    "good": "#1ABC9C",
+    "warning": "#F1C40F",
+    "degraded": "#E67E22",
+    "down": "#C0392B",
+}
+
+STATUS_LEVEL_ORDER = {"good": 0, "warning": 1, "degraded": 2, "down": 3}
+
+BACKGROUND_TINTS = {
+    "good": "#D5F5E3",
+    "warning": "#FCF3CF",
+    "degraded": "#FDEBD0",
+    "down": "#FADBD8",
+}
+
+
+def sanitize_latency_values(values):
+    clean = []
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, float) and math.isnan(value):
+            continue
+        clean.append(float(value))
+    return clean
+
+
+def average_latency(values):
+    clean = sanitize_latency_values(values)
+    if not clean:
+        return None
+    return sum(clean) / len(clean)
+
+
+def latest_latency(values):
+    for value in reversed(values):
+        if value is None:
+            continue
+        if isinstance(value, float) and math.isnan(value):
+            continue
+        return float(value)
+    return None
+
+
+def compute_loss_ratio(values):
+    if not values:
+        return None
+    total = len(values)
+    if total <= 0:
+        return None
+    up = sum(values)
+    down = total - up
+    return down / total if total else None
+
+
+def determine_hop_type_from_name(hop_name):
+    name = (hop_name or "").lower()
+    if name.startswith("hop 1") or "lan" in name:
+        return "lan"
+    if "internet" in name or "cloudflare" in name or "dns" in name or "extra" in name:
+        return "internet"
+    return "isp"
+
+
+def evaluate_status_level(hop_name, avg_ping, loss):
+    hop_type = determine_hop_type_from_name(hop_name)
+    if hop_type == "lan":
+        palette = LAN_PALETTE
+    elif hop_type == "internet":
+        palette = INTERNET_PALETTE
+    else:
+        palette = ISP_PALETTE
+
+    loss_value = None
+    if loss is not None:
+        try:
+            loss_value = float(loss)
+        except (TypeError, ValueError):
+            loss_value = None
+    if loss_value is not None:
+        if math.isnan(loss_value):
+            loss_value = None
+        else:
+            loss_value = max(0.0, min(1.0, loss_value))
+
+    ping_value = None
+    if avg_ping is not None:
+        try:
+            ping_value = float(avg_ping)
+        except (TypeError, ValueError):
+            ping_value = None
+    if ping_value is not None and math.isnan(ping_value):
+        ping_value = None
+
+    if loss_value is None and ping_value is None:
+        return "warning", palette["warning"]
+
+    if loss_value is not None and loss_value >= 1.0:
+        return "down", palette["down"]
+
+    if hop_type == "lan":
+        if loss_value is not None and loss_value > 0.0:
+            return "degraded", palette["degraded"]
+        if ping_value is not None:
+            if ping_value > 20:
+                return "degraded", palette["degraded"]
+            if ping_value >= 10:
+                return "warning", palette["warning"]
+        return "good", palette["good"]
+
+    if hop_type == "isp":
+        if loss_value is not None and loss_value > 0.02:
+            return "down", palette["down"]
+        if (ping_value is not None and ping_value > 60) or (
+            loss_value is not None and loss_value >= 0.005
+        ):
+            return "degraded", palette["degraded"]
+        if (ping_value is not None and ping_value >= 30) or (
+            loss_value is not None and 0.0 < loss_value < 0.005
+        ):
+            return "warning", palette["warning"]
+        return "good", palette["good"]
+
+    # Internet / extra target
+    if loss_value is not None and loss_value > 0.02:
+        return "down", palette["down"]
+    if (ping_value is not None and ping_value > 150) or (
+        loss_value is not None and loss_value >= 0.005
+    ):
+        return "degraded", palette["degraded"]
+    if ping_value is not None and ping_value >= 35:
+        return "warning", palette["warning"]
+    return "good", palette["good"]
+
+
+def get_status_color(hop_name, avg_ping, loss):
+    return evaluate_status_level(hop_name, avg_ping, loss)[1]
+
 # ---------------- Utility ----------------
 def run_cmd(cmd, timeout=None, shell=False):
     return subprocess.run(cmd if not shell else " ".join(cmd),
@@ -471,6 +624,7 @@ class NetworkMonitorApp:
             valinit=0.0,
             valfmt="%0.1f min",
         )
+        self.slider_ax.set_facecolor("#f8f9f9")
         self.time_slider.on_changed(self.on_slider_changed)
         self.position_time_slider()
 
@@ -483,6 +637,7 @@ class NetworkMonitorApp:
         self.extra_series = deque()
         self.extra_latency_series = deque()
         self.problem_flags = deque()
+        self.status_color_history = deque()
         self.internal_hops = []
         self.internet_ip = DEFAULT_INTERNET_FALLBACK
         self.extra_target = None
@@ -491,6 +646,12 @@ class NetworkMonitorApp:
                            "tab:pink", "tab:gray", "tab:olive", "tab:cyan"]
         self.internet_color = "skyblue"  # dashed
         self.extra_color = "mediumseagreen"
+        self.current_series_colors = {}
+        self.slider_background_patches = []
+        self.current_bg_level = None
+        self.current_bg_tint = None
+        self.last_applied_bg_level = None
+        self.last_applied_bg_color = None
         self.start_time = now_ts()
         self.total_measurements = 0
         self.page_dates = []
@@ -717,6 +878,55 @@ class NetworkMonitorApp:
                 pass
         self.problem_marker_artists = []
 
+    def clear_slider_background(self):
+        for patch in getattr(self, "slider_background_patches", []):
+            try:
+                patch.remove()
+            except Exception:
+                pass
+        self.slider_background_patches = []
+
+    def update_slider_background_visuals(self, all_timestamps, slider_min):
+        if not hasattr(self, "slider_ax"):
+            return
+
+        self.clear_slider_background()
+
+        if not all_timestamps or not self.status_color_history:
+            return
+
+        timestamps = list(all_timestamps)
+        colors = list(self.status_color_history)
+        if not timestamps or not colors:
+            return
+
+        min_len = min(len(timestamps), len(colors))
+        timestamps = timestamps[-min_len:]
+        colors = colors[-min_len:]
+
+        latest_ts = timestamps[-1]
+        offsets = [
+            (ts - latest_ts).total_seconds() / 60.0
+            for ts in timestamps
+        ]
+        if not offsets:
+            return
+
+        slider_min = float(slider_min)
+
+        if offsets[0] > slider_min:
+            patch = self.slider_ax.axvspan(slider_min, offsets[0], color=colors[0], alpha=0.25, zorder=0)
+            self.slider_background_patches.append(patch)
+
+        for idx, (offset, color) in enumerate(zip(offsets, colors)):
+            start = max(slider_min, offset)
+            next_offset = offsets[idx + 1] if idx + 1 < len(offsets) else 0.0
+            end = max(slider_min, min(next_offset, 0.0))
+            if end <= start:
+                continue
+            patch = self.slider_ax.axvspan(start, end, color=color, alpha=0.25, zorder=0)
+            self.slider_background_patches.append(patch)
+
     def update_slider_markers(self, all_timestamps, latest_ts, flags):
         self.clear_slider_markers()
         if not all_timestamps or not flags:
@@ -738,6 +948,20 @@ class NetworkMonitorApp:
             line = self.slider_ax.axvline(offset, color="red", ymin=0.15, ymax=0.85, alpha=0.5, linewidth=1)
             self.problem_marker_artists.append(line)
         self.slider_ax.figure.canvas.draw_idle()
+
+    def apply_background_tint(self):
+        tint = self.current_bg_tint or BACKGROUND_TINTS.get(self.current_bg_level)
+        if tint is None:
+            tint = "#FFFFFF"
+        if (
+            self.current_bg_level != self.last_applied_bg_level
+            or tint != self.last_applied_bg_color
+        ):
+            self.ax_status.set_facecolor(tint)
+            self.ax_latency.set_facecolor(tint)
+            self.fig.patch.set_facecolor(tint)
+            self.last_applied_bg_level = self.current_bg_level
+            self.last_applied_bg_color = tint
 
 
     # ---------- CSV ----------
@@ -801,7 +1025,14 @@ class NetworkMonitorApp:
         self.extra_latency_series = deque()
         self.internet_latency_series = deque()
         self.problem_flags = deque()
+        self.status_color_history = deque()
+        self.current_series_colors = {}
+        self.current_bg_level = None
+        self.current_bg_tint = None
+        self.last_applied_bg_level = None
+        self.last_applied_bg_color = None
         self.clear_slider_markers()
+        self.clear_slider_background()
 
         # Clear GUI log
         self.textbox.configure(state="normal")
@@ -863,6 +1094,7 @@ class NetworkMonitorApp:
             self.extra_series = deque()
             self.extra_latency_series = deque()
         self.problem_flags = deque()
+        self.status_color_history = deque()
         self.maintenance_active = False
         self.update_stats_label()
         self.paused = False
@@ -898,6 +1130,12 @@ class NetworkMonitorApp:
         if color:
             self.status_label.config(foreground=color, text=msg)
         self.root.update_idletasks()
+
+    def update_status_indicator(self, message, color):
+        try:
+            self.status_label.config(text=message, foreground=color)
+        except Exception:
+            pass
 
     # ---------- Monitor loop ----------
     def monitor_loop(self):
@@ -963,7 +1201,12 @@ class NetworkMonitorApp:
             self.update_stats_label()
 
             # Classify
-            status, color = self.classify(hop_results, internet_ok, extra_result)
+            status, color, status_info = self.classify(hop_results, internet_ok, extra_result)
+            overall_color = status_info.get("worst_color") or color
+            self.status_color_history.append(overall_color)
+            while len(self.status_color_history) > len(self.timestamps):
+                self.status_color_history.popleft()
+            self.update_status_indicator(status, overall_color)
 
             # Log to files + console
             line = self.log_line(
@@ -976,7 +1219,7 @@ class NetworkMonitorApp:
                 extra_result=extra_result,
             )
             print(line)
-            self.append_gui(line, color)
+            self.append_gui(line)
 
             # Redraw plot
             self.update_plot()
@@ -1009,25 +1252,123 @@ class NetworkMonitorApp:
                 self.extra_latency_series.popleft()
             if self.problem_flags:
                 self.problem_flags.popleft()
+            if self.status_color_history:
+                self.status_color_history.popleft()
+
+    def evaluate_connection_states(self, hop_results, internet_ok, extra_result=None):
+        details = []
+        series_colors = {}
+
+        for idx, (ip, ok, _) in enumerate(hop_results, start=1):
+            label = f"Hop {idx} ({ip})"
+            history_values = list(self.history.get(ip, []))
+            loss_ratio = compute_loss_ratio(history_values)
+            if loss_ratio is None:
+                loss_ratio = 1.0 if not ok else 0.0
+            elif not ok:
+                loss_ratio = 1.0
+            latency_series = list(self.latency_history.get(ip, []))
+            avg_latency = average_latency(latency_series)
+            level, color = evaluate_status_level(label, avg_latency, loss_ratio)
+            details.append(
+                {
+                    "label": label,
+                    "level": level,
+                    "color": color,
+                    "avg_latency": avg_latency,
+                    "loss": loss_ratio,
+                }
+            )
+            series_colors[label] = color
+
+        internet_label = f"Internet ({self.internet_ip})"
+        inet_history = list(self.internet_series)
+        inet_loss = compute_loss_ratio(inet_history)
+        if inet_loss is None:
+            inet_loss = 1.0 if not internet_ok else 0.0
+        elif not internet_ok:
+            inet_loss = 1.0
+        inet_avg = average_latency(self.internet_latency_series)
+        inet_level, inet_color = evaluate_status_level(internet_label, inet_avg, inet_loss)
+        details.append(
+            {
+                "label": internet_label,
+                "level": inet_level,
+                "color": inet_color,
+                "avg_latency": inet_avg,
+                "loss": inet_loss,
+            }
+        )
+        series_colors[internet_label] = inet_color
+
+        if self.extra_target and extra_result:
+            extra_label = f"{self.extra_label} ({self.extra_target})"
+            extra_history = list(self.extra_series)
+            extra_loss = compute_loss_ratio(extra_history)
+            if extra_loss is None:
+                extra_loss = 1.0 if not extra_result[1] else 0.0
+            elif not extra_result[1]:
+                extra_loss = 1.0
+            extra_avg = average_latency(self.extra_latency_series)
+            extra_level, extra_color = evaluate_status_level(extra_label, extra_avg, extra_loss)
+            details.append(
+                {
+                    "label": extra_label,
+                    "level": extra_level,
+                    "color": extra_color,
+                    "avg_latency": extra_avg,
+                    "loss": extra_loss,
+                }
+            )
+            series_colors[extra_label] = extra_color
+
+        if details:
+            worst_detail = max(details, key=lambda d: STATUS_LEVEL_ORDER.get(d["level"], 0))
+            worst_level = worst_detail["level"]
+            worst_color = worst_detail["color"]
+        else:
+            worst_level = None
+            worst_color = LAN_PALETTE["warning"]
+
+        background_color = BACKGROUND_TINTS.get(worst_level, "#FFFFFF")
+
+        return {
+            "series_details": details,
+            "series_colors": series_colors,
+            "worst_level": worst_level,
+            "worst_color": worst_color,
+            "background_color": background_color,
+        }
 
     def classify(self, hop_results, internet_ok, extra_result=None):
+        status_info = self.evaluate_connection_states(hop_results, internet_ok, extra_result)
+        self.current_series_colors = status_info.get("series_colors", {})
+        self.current_bg_level = status_info.get("worst_level")
+        self.current_bg_tint = status_info.get("background_color")
+
         all_internal_ok = all(ok for _, ok, _ in hop_results)
         first_hop_ok = hop_results[0][1] if hop_results else True
         if not first_hop_ok:
-            return "❌ First hop down — local LAN issue", "red"
-        for idx, (ip, ok, _) in enumerate(hop_results, start=1):
-            if not ok:
-                return f"🟠 Hop {idx} ({ip}) down — intermediate router issue", "orange"
-        if not internet_ok:
-            return "🔴 Internet down — ISP/DNS issue", "red"
-        if extra_result and not extra_result[1]:
-            return (
-                f"🟣 {self.extra_label} ({extra_result[0]}) down — custom check failed",
-                "purple",
-            )
-        if all_internal_ok and internet_ok and (not extra_result or extra_result[1]):
-            return "✅ All good — connection stable", "green"
-        return "⚠️ Indeterminate state", "gray"
+            message = "❌ First hop down — local LAN issue"
+        else:
+            message = None
+        if message is None:
+            for idx, (ip, ok, _) in enumerate(hop_results, start=1):
+                if not ok:
+                    message = f"🟠 Hop {idx} ({ip}) down — intermediate router issue"
+                    break
+        if message is None and not internet_ok:
+            message = "🔴 Internet down — ISP/DNS issue"
+        if message is None and extra_result and not extra_result[1]:
+            message = f"🔴 {self.extra_label} ({extra_result[0]}) down — custom check failed"
+        if message is None and all_internal_ok and internet_ok and (not extra_result or extra_result[1]):
+            message = "✅ All good — connection stable"
+        if message is None:
+            message = "⚠️ Indeterminate state"
+
+        status_info["message"] = message
+        worst_color = status_info.get("worst_color") or LAN_PALETTE["good"]
+        return message, worst_color, status_info
 
     def log_line(self, ts, hop_results, internet_ok, internet_latency, fail_count, status, extra_result=None):
         human = fmt_time(ts)
@@ -1259,7 +1600,8 @@ class NetworkMonitorApp:
             end_time = t_vis[-1]
 
         for i, ip in enumerate(self.internal_hops):
-            color = self.hop_colors[i % len(self.hop_colors)]
+            label = f"Hop {i + 1} ({ip})"
+            color = self.current_series_colors.get(label, self.hop_colors[i % len(self.hop_colors)])
             status_values = list(self.history.get(ip, []))
             latency_values = list(self.latency_history.get(ip, []))
 
@@ -1276,7 +1618,6 @@ class NetworkMonitorApp:
                     else:
                         latency_series.append(float(value))
 
-            label = f"Hop {i + 1} ({ip})"
             self.ax_status.plot(t_vis, status_series, label=label, color=color, marker="o", linewidth=1.5)
             self.ax_latency.plot(t_vis, latency_series, color=color, marker="o", linewidth=1.2, label="_nolegend_")
 
@@ -1295,16 +1636,26 @@ class NetworkMonitorApp:
                 else:
                     latency_series.append(float(value))
 
+        internet_label = f"Internet ({self.internet_ip})"
+        internet_color = self.current_series_colors.get(internet_label, self.internet_color)
         self.ax_status.plot(
             t_vis,
             status_series,
-            label="Internet",
-            color=self.internet_color,
+            label=internet_label,
+            color=internet_color,
             linestyle="--",
             marker="o",
             linewidth=1.8,
         )
-        self.ax_latency.plot(t_vis, latency_series, color=self.internet_color, linestyle="--", marker="o", linewidth=1.4, label="_nolegend_")
+        self.ax_latency.plot(
+            t_vis,
+            latency_series,
+            color=internet_color,
+            linestyle="--",
+            marker="o",
+            linewidth=1.4,
+            label="_nolegend_",
+        )
 
         if self.extra_target:
             extra_status_values = list(self.extra_series)
@@ -1322,11 +1673,13 @@ class NetworkMonitorApp:
                     else:
                         latency_series.append(float(value))
 
+            extra_label = f"{self.extra_label} ({self.extra_target})"
+            extra_color = self.current_series_colors.get(extra_label, self.extra_color)
             self.ax_status.plot(
                 t_vis,
                 status_series,
-                label=f"{self.extra_label} ({self.extra_target})",
-                color=self.extra_color,
+                label=extra_label,
+                color=extra_color,
                 linestyle=":",
                 marker="o",
                 linewidth=1.6,
@@ -1334,7 +1687,7 @@ class NetworkMonitorApp:
             self.ax_latency.plot(
                 t_vis,
                 latency_series,
-                color=self.extra_color,
+                color=extra_color,
                 linestyle=":",
                 marker="o",
                 linewidth=1.2,
@@ -1353,6 +1706,10 @@ class NetworkMonitorApp:
             ncol=1,
             title="Connections",
         )
+        if legend:
+            frame = legend.get_frame()
+            frame.set_facecolor(self.fig.patch.get_facecolor())
+            frame.set_alpha(0.9)
 
         # Make space on the right for legend while keeping the enlarged bottom
         # margin that separates the x-axis labels from the slider.
@@ -1384,6 +1741,8 @@ class NetworkMonitorApp:
             x_right += pad
         self.ax_status.set_xlim(x_left, x_right)
 
+        self.apply_background_tint()
+        self.update_slider_background_visuals(t_all, slider_min_minutes)
         self.update_slider_markers(t_page, t_max, flags_page)
         self.canvas.draw_idle()
 
@@ -1434,25 +1793,6 @@ class NetworkMonitorApp:
 
         self.summary_label.config(text=" | ".join(summary_parts))
 
-        def sanitize_latency_values(values):
-            clean = []
-            for value in values:
-                if value is None:
-                    continue
-                if isinstance(value, float) and math.isnan(value):
-                    continue
-                clean.append(float(value))
-            return clean
-
-        def latest_latency(values):
-            for value in reversed(values):
-                if value is None:
-                    continue
-                if isinstance(value, float) and math.isnan(value):
-                    continue
-                return float(value)
-            return None
-
         for idx, ip in enumerate(self.internal_hops, start=1):
             widgets = self.stat_rows.get(ip)
             if not widgets:
@@ -1467,8 +1807,7 @@ class NetworkMonitorApp:
             widgets["progress"]["value"] = up_pct
 
             latency_series = list(self.latency_history.get(ip, []))
-            clean_latency = sanitize_latency_values(latency_series)
-            avg_latency = sum(clean_latency) / len(clean_latency) if clean_latency else None
+            avg_latency = average_latency(latency_series)
             latest = latest_latency(latency_series)
 
             latency_bits = []
@@ -1490,8 +1829,7 @@ class NetworkMonitorApp:
             inet_widgets["progress"]["value"] = up_pct
 
             inet_latency_series = list(self.internet_latency_series)
-            clean_latency = sanitize_latency_values(inet_latency_series)
-            avg_latency = sum(clean_latency) / len(clean_latency) if clean_latency else None
+            avg_latency = average_latency(inet_latency_series)
             latest = latest_latency(inet_latency_series)
 
             latency_bits = []
@@ -1513,8 +1851,7 @@ class NetworkMonitorApp:
             extra_widgets["progress"]["value"] = up_pct
 
             extra_latency_series = list(self.extra_latency_series)
-            clean_latency = sanitize_latency_values(extra_latency_series)
-            avg_latency = sum(clean_latency) / len(clean_latency) if clean_latency else None
+            avg_latency = average_latency(extra_latency_series)
             latest = latest_latency(extra_latency_series)
 
             latency_bits = []
