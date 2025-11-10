@@ -1043,8 +1043,6 @@ class NetworkMonitorApp:
         t_max = t_all[-1]
 
         index_list = self.get_page_indices(t_all)
-        history_lists = {ip: list(self.history[ip]) for ip in self.internal_hops}
-        internet_list = list(self.internet_series)
         flags_list = list(self.problem_flags)
 
         t_page = [t_all[idx] for idx in index_list]
@@ -1052,9 +1050,12 @@ class NetworkMonitorApp:
             self.canvas.draw()
             return
 
-        history_page = {ip: [history_lists[ip][idx] for idx in index_list] for ip in self.internal_hops}
-        internet_page = [internet_list[idx] for idx in index_list]
-        flags_page = [flags_list[idx] for idx in index_list]
+        flags_page = []
+        for idx in index_list:
+            if idx < len(flags_list):
+                flags_page.append(flags_list[idx])
+            else:
+                flags_page.append(False)
 
         t_min = t_page[0]
         t_max = t_page[-1]
@@ -1110,8 +1111,6 @@ class NetworkMonitorApp:
             end_time = t_vis[-1]
 
         for i, ip in enumerate(self.internal_hops):
-            series = history_page[ip]
-            y_vis = [val for ts, val in zip(t_page, series) if in_window(ts)]
             color = self.hop_colors[i % len(self.hop_colors)]
             status_values = list(self.history.get(ip, []))
             latency_values = list(self.latency_history.get(ip, []))
@@ -1163,10 +1162,6 @@ class NetworkMonitorApp:
         self.ax_status.set_yticks([0, 1])
         self.ax_status.set_yticklabels(["Down", "Up"])
         self.ax_status.grid(axis="y", linestyle="--", alpha=0.3)
-        # Plot internet (dashed)
-        y_inet = [val for ts, val in zip(t_page, internet_page) if in_window(ts)]
-        self.ax.plot(t_vis, y_inet, label="Internet", color="skyblue", linestyle="--", marker="o", linewidth=1.8)
-
         legend = self.ax_status.legend(
             loc="center left",
             bbox_to_anchor=(1.02, 0.5),
