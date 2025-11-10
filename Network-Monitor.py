@@ -42,6 +42,7 @@ MAX_HISTORY_DAYS = 7          # keep at most 7 days of data in memory
 HISTORY_HOURS = 24 * MAX_HISTORY_DAYS
 
 DEFAULT_EXTRA_TARGET = "1.1.1.1"  # Optional extra host/IP to monitor (Cloudflare DNS)
+DEFAULT_EXTRA_LABEL = "Extra"
 
 LOG_BASENAME = "network_log"
 LOG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -304,6 +305,7 @@ class NetworkMonitorApp:
         self.var_fast_retry = tk.IntVar(value=DEFAULT_FAST_RETRY_SEC)
         self.var_window_min = tk.IntVar(value=DEFAULT_WINDOW_MIN)
         self.var_extra_target = tk.StringVar(value=DEFAULT_EXTRA_TARGET)
+        self.var_extra_label = tk.StringVar(value=DEFAULT_EXTRA_LABEL)
         self.var_maintenance_frequency = tk.StringVar(value="Off")
         self.var_maintenance_time = tk.StringVar(value="03:00")
         self.var_maintenance_duration = tk.IntVar(value=10)
@@ -365,6 +367,10 @@ class NetworkMonitorApp:
         ttk.Label(settings, text="Extra host/IP (optional):").grid(row=1, column=8, sticky="w", padx=12, pady=4)
         self.extra_target_entry = ttk.Entry(settings, textvariable=self.var_extra_target, width=18)
         self.extra_target_entry.grid(row=1, column=9, sticky="w")
+
+        ttk.Label(settings, text="Extra display name:").grid(row=1, column=10, sticky="w", padx=12, pady=4)
+        self.extra_label_entry = ttk.Entry(settings, textvariable=self.var_extra_label, width=16)
+        self.extra_label_entry.grid(row=1, column=11, sticky="w")
 
         ttk.Label(settings, text="Maintenance:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
         self.maintenance_mode_combo = ttk.Combobox(
@@ -480,6 +486,7 @@ class NetworkMonitorApp:
         self.internal_hops = []
         self.internet_ip = DEFAULT_INTERNET_FALLBACK
         self.extra_target = None
+        self.extra_label = DEFAULT_EXTRA_LABEL
         self.hop_colors = ["tab:blue", "tab:orange", "tab:purple", "tab:brown",
                            "tab:pink", "tab:gray", "tab:olive", "tab:cyan"]
         self.internet_color = "skyblue"  # dashed
@@ -500,7 +507,12 @@ class NetworkMonitorApp:
         # Detect route once
         self.internal_hops, self.internet_ip = detect_route()
         self.extra_target = self.resolve_extra_target()
-        extra_display = f" → Extra={self.extra_target}" if self.extra_target else ""
+        self.extra_label = self.resolve_extra_label()
+        extra_display = (
+            f" → {self.extra_label}={self.extra_target}"
+            if self.extra_target
+            else ""
+        )
         print(f"🌐 Targets: {self.internal_hops} → Internet={self.internet_ip}{extra_display}")
         self.append_gui(
             f"Targets → {', '.join(self.internal_hops)} → Internet={self.internet_ip}{extra_display}"
@@ -560,6 +572,9 @@ class NetworkMonitorApp:
                 extra_val = data.get("extra_target", self.var_extra_target.get())
                 if isinstance(extra_val, str):
                     self.var_extra_target.set(extra_val)
+                extra_label_val = data.get("extra_label", self.var_extra_label.get())
+                if isinstance(extra_label_val, str):
+                    self.var_extra_label.set(extra_label_val)
                 print("⚙️ Settings loaded from file.")
             except Exception as e:
                 print(f"⚠️ Could not load settings: {e}")
@@ -573,6 +588,7 @@ class NetworkMonitorApp:
             "fast_retry": self.var_fast_retry.get(),
             "window_min": self.var_window_min.get(),
             "extra_target": self.var_extra_target.get(),
+            "extra_label": self.var_extra_label.get(),
             "maintenance_frequency": self.var_maintenance_frequency.get(),
             "maintenance_time": self.var_maintenance_time.get(),
             "maintenance_duration": self.var_maintenance_duration.get(),
@@ -621,7 +637,8 @@ class NetworkMonitorApp:
         row += 1
 
         if self.extra_target:
-            extra_title = f"Extra ({self.extra_target})"
+            extra_name = self.extra_label or DEFAULT_EXTRA_LABEL
+            extra_title = f"{extra_name} ({self.extra_target})"
             self.stat_rows["Extra"] = self._create_stat_row(row, extra_title)
 
     def resolve_extra_target(self):
@@ -630,6 +647,13 @@ class NetworkMonitorApp:
             return None
         value = value.strip()
         return value or None
+
+    def resolve_extra_label(self):
+        value = self.var_extra_label.get()
+        if not isinstance(value, str):
+            return DEFAULT_EXTRA_LABEL
+        value = value.strip()
+        return value or DEFAULT_EXTRA_LABEL
 
     def parse_maintenance_time(self):
         try:
@@ -800,6 +824,7 @@ class NetworkMonitorApp:
         # Re-detect route targets
         self.internal_hops, self.internet_ip = detect_route()
         self.extra_target = self.resolve_extra_target()
+        self.extra_label = self.resolve_extra_label()
         self.history = {ip: deque() for ip in self.internal_hops}
         self.latency_history = {ip: deque() for ip in self.internal_hops}
         if self.extra_target:
@@ -821,7 +846,12 @@ class NetworkMonitorApp:
         self.update_plot()
 
         # Update status and resume monitoring
-        extra_display = f" → Extra={self.extra_target}" if self.extra_target else ""
+        self.extra_label = self.resolve_extra_label()
+        extra_display = (
+            f" → {self.extra_label}={self.extra_target}"
+            if self.extra_target
+            else ""
+        )
         targets_msg = f"Targets → {', '.join(self.internal_hops)} → Internet={self.internet_ip}{extra_display}"
         self.append_gui(targets_msg)
         self.status_label.config(text="Monitoring...", foreground="black")
@@ -880,6 +910,7 @@ class NetworkMonitorApp:
             attempts = int(self.var_attempts.get())
             timeout = int(self.var_timeout.get())
             fast_retry = int(self.var_fast_retry.get())
+            self.extra_label = self.resolve_extra_label()
 
             ts = now_ts()
 
@@ -990,7 +1021,10 @@ class NetworkMonitorApp:
         if not internet_ok:
             return "🔴 Internet down — ISP/DNS issue", "red"
         if extra_result and not extra_result[1]:
-            return f"🟣 Extra target ({extra_result[0]}) down — custom check failed", "purple"
+            return (
+                f"🟣 {self.extra_label} ({extra_result[0]}) down — custom check failed",
+                "purple",
+            )
         if all_internal_ok and internet_ok and (not extra_result or extra_result[1]):
             return "✅ All good — connection stable", "green"
         return "⚠️ Indeterminate state", "gray"
@@ -1011,7 +1045,7 @@ class NetworkMonitorApp:
         if extra_result:
             extra_ip, extra_ok, extra_latency = extra_result
             parts.append(
-                f"Extra {extra_ip}:{'True' if extra_ok else 'False'} ({pretty_latency(extra_latency)})"
+                f"{self.extra_label} ({extra_ip}):{'True' if extra_ok else 'False'} ({pretty_latency(extra_latency)})"
             )
         line = (
             f"[{human}] "
@@ -1135,6 +1169,7 @@ class NetworkMonitorApp:
             self.time_slider.set_val(0.0)
 
     def update_plot(self):
+        self.extra_label = self.resolve_extra_label()
         self.ax_status.clear()
         self.ax_latency.clear()
 
@@ -1290,7 +1325,7 @@ class NetworkMonitorApp:
             self.ax_status.plot(
                 t_vis,
                 status_series,
-                label=f"Extra ({self.extra_target})",
+                label=f"{self.extra_label} ({self.extra_target})",
                 color=self.extra_color,
                 linestyle=":",
                 marker="o",
@@ -1316,7 +1351,7 @@ class NetworkMonitorApp:
             borderaxespad=0,
             framealpha=0.7,
             ncol=1,
-            title="Connecties",
+            title="Connections",
         )
 
         # Make space on the right for legend while keeping the enlarged bottom
@@ -1327,14 +1362,14 @@ class NetworkMonitorApp:
 
         self.fig.subplots_adjust(right=0.8, hspace=0.25)
 
-        extra_suffix = " + extra host" if self.extra_target else ""
-        self.ax_status.set_title(f"Connectiviteit ({len(self.internal_hops)} interne hop(s){extra_suffix})")
+        extra_suffix = f" + {self.extra_label}" if self.extra_target else ""
+        self.ax_status.set_title(f"Connectivity ({len(self.internal_hops)} internal hop(s){extra_suffix})")
         self.ax_status.set_ylabel("Status (Up/Down)")
 
-        self.ax_latency.set_title("Latency-overzicht")
+        self.ax_latency.set_title("Latency Overview")
         self.ax_latency.set_ylabel("Latency (ms)")
         self.ax_latency.grid(True, linestyle="--", alpha=0.3)
-        self.ax_latency.set_xlabel("Tijd")
+        self.ax_latency.set_xlabel("Time")
 
         import matplotlib.dates as mdates
 
@@ -1375,6 +1410,7 @@ class NetworkMonitorApp:
         return " ".join(parts)
 
     def update_stats_label(self):
+        self.extra_label = self.resolve_extra_label()
         elapsed = (
             now_ts() - self.start_time if hasattr(self, "start_time") and self.start_time else datetime.timedelta(0)
         )
@@ -1388,13 +1424,13 @@ class NetworkMonitorApp:
             up_pct = (up_count / total_count) * 100
             down_pct = 100 - up_pct
             return f"{up_pct:.1f}% up ({up_count}) / {down_pct:.1f}% down ({down_count})"
-        summary_parts = [f"Metingen: {self.total_measurements}", f"Tijd: {elapsed_str}"]
+        summary_parts = [f"Measurements: {self.total_measurements}", f"Runtime: {elapsed_str}"]
 
         if self.timestamps:
-            summary_parts.append(f"Laatste meting: {fmt_time(self.timestamps[-1])}")
+            summary_parts.append(f"Last measurement: {fmt_time(self.timestamps[-1])}")
 
         outages = sum(self.problem_flags) if self.problem_flags else 0
-        summary_parts.append(f"Storingen gedetecteerd: {outages}")
+        summary_parts.append(f"Outages detected: {outages}")
 
         self.summary_label.config(text=" | ".join(summary_parts))
 
@@ -1439,8 +1475,8 @@ class NetworkMonitorApp:
             if avg_latency is not None:
                 latency_bits.append(f"avg {avg_latency:.1f} ms")
             if latest is not None:
-                latency_bits.append(f"laatste {latest:.1f} ms")
-            latency_text = " | ".join(latency_bits) if latency_bits else "geen data"
+                latency_bits.append(f"latest {latest:.1f} ms")
+            latency_text = " | ".join(latency_bits) if latency_bits else "no data"
 
             widgets["value"].config(text=f"{up_pct:.1f}% up | {latency_text}")
 
@@ -1462,14 +1498,14 @@ class NetworkMonitorApp:
             if avg_latency is not None:
                 latency_bits.append(f"avg {avg_latency:.1f} ms")
             if latest is not None:
-                latency_bits.append(f"laatste {latest:.1f} ms")
-            latency_text = " | ".join(latency_bits) if latency_bits else "geen data"
+                latency_bits.append(f"latest {latest:.1f} ms")
+            latency_text = " | ".join(latency_bits) if latency_bits else "no data"
 
             inet_widgets["value"].config(text=f"{up_pct:.1f}% up | {latency_text}")
 
         extra_widgets = self.stat_rows.get("Extra")
         if extra_widgets and self.extra_target:
-            extra_widgets["label"].config(text=f"Extra ({self.extra_target})")
+            extra_widgets["label"].config(text=f"{self.extra_label} ({self.extra_target})")
             extra_series = list(self.extra_series)
             total = len(extra_series)
             up = sum(extra_series) if total else 0
@@ -1485,8 +1521,8 @@ class NetworkMonitorApp:
             if avg_latency is not None:
                 latency_bits.append(f"avg {avg_latency:.1f} ms")
             if latest is not None:
-                latency_bits.append(f"laatste {latest:.1f} ms")
-            latency_text = " | ".join(latency_bits) if latency_bits else "geen data"
+                latency_bits.append(f"latest {latest:.1f} ms")
+            latency_text = " | ".join(latency_bits) if latency_bits else "no data"
 
             extra_widgets["value"].config(text=f"{up_pct:.1f}% up | {latency_text}")
 
