@@ -1363,7 +1363,7 @@ class NetworkMonitorApp:
         self.fig.subplots_adjust(right=0.8, hspace=0.25)
 
         extra_suffix = f" + {self.extra_label}" if self.extra_target else ""
-        self.ax_status.set_title(f"Connectivity ({len(self.internal_hops)} internal hop(s){extra_suffix})")
+        self.ax_status.set_title(f"Connectivity")
         self.ax_status.set_ylabel("Status (Up/Down)")
 
         self.ax_latency.set_title("Latency Overview")
