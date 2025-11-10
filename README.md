@@ -66,9 +66,9 @@ pip install matplotlib
 ---
 
 ## 🖼️ Example Screenshot
-*(Replace this placeholder once you have a screenshot.)*
+Below is a recent capture of the Network Monitor interface in action.
 
-![Network Monitor GUI Example](screenshot.png)
+![Network Monitor GUI Example](Screenshot.png)
 
 ---
 
