@@ -37,7 +37,8 @@ DEFAULT_ATTEMPTS = 3          # ping attempts per cycle
 DEFAULT_TIMEOUT_SEC = 2       # per attempt timeout
 DEFAULT_FAST_RETRY_SEC = 2    # temporary faster retry when any hop is down
 DEFAULT_WINDOW_MIN = 60       # time window shown when using the slider (minutes)
-HISTORY_HOURS = 24            # keep at most 24h of data in memory
+MAX_HISTORY_DAYS = 7          # keep at most 7 days of data in memory
+HISTORY_HOURS = 24 * MAX_HISTORY_DAYS
 
 LOG_BASENAME = "network_log"
 LOG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -387,6 +388,16 @@ class NetworkMonitorApp:
         self.toolbar = NavigationToolbar2Tk(self.canvas, plot_frame)
         self.toolbar.update()
 
+        # Pagination controls (24h per page)
+        pagination_frame = ttk.Frame(plot_frame)
+        pagination_frame.pack(fill="x", pady=(6, 0))
+        self.prev_page_btn = ttk.Button(pagination_frame, text="◀ Previous day", command=self.prev_page)
+        self.prev_page_btn.pack(side="left")
+        self.page_label_var = tk.StringVar(value="No history")
+        ttk.Label(pagination_frame, textvariable=self.page_label_var).pack(side="left", padx=8)
+        self.next_page_btn = ttk.Button(pagination_frame, text="Next day ▶", command=self.next_page)
+        self.next_page_btn.pack(side="left")
+
         # Slider (matplotlib) — add an axis below the plot
         self.slider_ax = self.fig.add_axes([0.12, 0.02, 0.76, 0.03])  # [left, bottom, width, height] in figure coords
         self.time_slider = Slider(
@@ -411,6 +422,8 @@ class NetworkMonitorApp:
         self.internet_color = "skyblue"  # dashed
         self.start_time = now_ts()
         self.total_measurements = 0
+        self.page_dates = []
+        self.current_page_index = 0
 
         # Initialize log file paths (TXT + CSV will be timestamped)
         self.start_new_log_files()
@@ -440,6 +453,7 @@ class NetworkMonitorApp:
         self.problem_marker_artists = []
         self.maintenance_active = False
         self.update_maintenance_widgets()
+        self.refresh_page_controls()
 
         # Start monitor thread
         threading.Thread(target=self.monitor_loop, daemon=True).start()
@@ -562,14 +576,14 @@ class NetworkMonitorApp:
                 pass
         self.problem_marker_artists = []
 
-    def update_slider_markers(self, all_timestamps, latest_ts):
+    def update_slider_markers(self, all_timestamps, latest_ts, flags):
         self.clear_slider_markers()
-        if not all_timestamps or not self.problem_flags:
+        if not all_timestamps or not flags:
             self.slider_ax.figure.canvas.draw_idle()
             return
 
         offsets = []
-        for ts, flag in zip(all_timestamps, list(self.problem_flags)):
+        for ts, flag in zip(all_timestamps, flags):
             if flag:
                 offsets.append((ts - latest_ts).total_seconds() / 60.0)
 
@@ -831,6 +845,73 @@ class NetworkMonitorApp:
         # Slider value represents minute offset relative to latest measurement (<= 0)
         self.update_plot()
 
+    def get_page_indices(self, timestamps):
+        if not timestamps:
+            return []
+        if not self.page_dates:
+            return list(range(len(timestamps)))
+        if not (0 <= self.current_page_index < len(self.page_dates)):
+            return list(range(len(timestamps)))
+        current_date = self.page_dates[self.current_page_index]
+        start_of_day = datetime.datetime.combine(current_date, datetime.time.min)
+        end_of_day = start_of_day + datetime.timedelta(days=1)
+        indices = [idx for idx, ts in enumerate(timestamps) if start_of_day <= ts < end_of_day]
+        return indices or list(range(len(timestamps)))
+
+    def update_pagination(self):
+        timestamps = list(self.timestamps)
+        unique_dates = sorted({ts.date() for ts in timestamps})
+        was_on_latest = self.page_dates and self.current_page_index == len(self.page_dates) - 1
+        self.page_dates = unique_dates
+        if not self.page_dates:
+            self.current_page_index = 0
+        else:
+            if was_on_latest or self.current_page_index >= len(self.page_dates):
+                self.current_page_index = len(self.page_dates) - 1
+            else:
+                self.current_page_index = max(0, min(self.current_page_index, len(self.page_dates) - 1))
+        self.refresh_page_controls()
+
+    def refresh_page_controls(self):
+        if not getattr(self, "prev_page_btn", None):
+            return
+        if not self.page_dates:
+            self.page_label_var.set("No history")
+            self.prev_page_btn.state(["disabled"])
+            self.next_page_btn.state(["disabled"])
+            return
+        total = len(self.page_dates)
+        current = self.page_dates[self.current_page_index]
+        self.page_label_var.set(f"History: {current.strftime('%Y-%m-%d')} ({self.current_page_index + 1}/{total})")
+        if self.current_page_index == 0:
+            self.prev_page_btn.state(["disabled"])
+        else:
+            self.prev_page_btn.state(["!disabled"])
+        if self.current_page_index >= total - 1:
+            self.next_page_btn.state(["disabled"])
+        else:
+            self.next_page_btn.state(["!disabled"])
+
+    def prev_page(self):
+        if not self.page_dates:
+            return
+        if self.current_page_index <= 0:
+            return
+        self.current_page_index -= 1
+        self.refresh_page_controls()
+        if hasattr(self, "time_slider"):
+            self.time_slider.set_val(0.0)
+
+    def next_page(self):
+        if not self.page_dates:
+            return
+        if self.current_page_index >= len(self.page_dates) - 1:
+            return
+        self.current_page_index += 1
+        self.refresh_page_controls()
+        if hasattr(self, "time_slider"):
+            self.time_slider.set_val(0.0)
+
     def update_plot(self):
         self.ax.clear()
 
@@ -839,13 +920,32 @@ class NetworkMonitorApp:
             self.canvas.draw()
             return
 
+        self.update_pagination()
+
         # Determine visible window from slider + window size
         window_min = max(1, int(self.var_window_min.get()))
+        window_min = min(window_min, 24 * 60)
+        if window_min != self.var_window_min.get():
+            self.var_window_min.set(window_min)
         window_delta = datetime.timedelta(minutes=window_min)
 
         t_all = list(self.timestamps)
-        t_min = t_all[0]
-        t_max = t_all[-1]
+        index_list = self.get_page_indices(t_all)
+        history_lists = {ip: list(self.history[ip]) for ip in self.internal_hops}
+        internet_list = list(self.internet_series)
+        flags_list = list(self.problem_flags)
+
+        t_page = [t_all[idx] for idx in index_list]
+        if not t_page:
+            self.canvas.draw()
+            return
+
+        history_page = {ip: [history_lists[ip][idx] for idx in index_list] for ip in self.internal_hops}
+        internet_page = [internet_list[idx] for idx in index_list]
+        flags_page = [flags_list[idx] for idx in index_list]
+
+        t_min = t_page[0]
+        t_max = t_page[-1]
         # Update slider range to match available history (expressed in minutes)
         computed_slider_min = ((t_min + window_delta) - t_max).total_seconds() / 60.0
         slider_min_minutes = min(0.0, computed_slider_min)
@@ -893,22 +993,22 @@ class NetworkMonitorApp:
         def in_window(ts):
             return start_time <= ts <= end_time
 
-        t_vis = [ts for ts in t_all if in_window(ts)]
+        t_vis = [ts for ts in t_page if in_window(ts)]
         if not t_vis:
             # if no points in window, widen slightly around end
-            t_vis = t_all[-min(len(t_all), 10):]
+            t_vis = t_page[-min(len(t_page), 10):]
             start_time = t_vis[0]
             end_time = t_vis[-1]
 
         # Plot internal hops
         for i, ip in enumerate(self.internal_hops):
-            series = self.history[ip]
-            y_vis = [series[idx] for idx, ts in enumerate(t_all) if in_window(ts)]
+            series = history_page[ip]
+            y_vis = [val for ts, val in zip(t_page, series) if in_window(ts)]
             color = self.hop_colors[i % len(self.hop_colors)]
             self.ax.plot(t_vis, y_vis, label=f"Hop {i+1} ({ip})", color=color, marker="o", linewidth=1.5)
 
         # Plot internet (dashed)
-        y_inet = [self.internet_series[idx] for idx, ts in enumerate(t_all) if in_window(ts)]
+        y_inet = [val for ts, val in zip(t_page, internet_page) if in_window(ts)]
         self.ax.plot(t_vis, y_inet, label="Internet", color="skyblue", linestyle="--", marker="o", linewidth=1.8)
 
         self.ax.set_ylim(-0.1, 1.1)
@@ -946,7 +1046,7 @@ class NetworkMonitorApp:
             x_right += pad
         self.ax.set_xlim(x_left, x_right)
 
-        self.update_slider_markers(t_all, t_max)
+        self.update_slider_markers(t_page, t_max, flags_page)
         self.canvas.draw_idle()
 
     def format_elapsed(self, delta):
