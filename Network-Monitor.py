@@ -17,6 +17,7 @@
 #   - On Linux/macOS, needs `traceroute` installed.
 
 import os, subprocess, time, datetime, platform, threading, re, csv, shutil
+import math
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
 from collections import deque
@@ -234,6 +235,14 @@ def detect_route():
     return internal if internal else ["192.168.0.1"], (first_public or DEFAULT_INTERNET_FALLBACK)
 
 # ------------- Ping engine -------------
+def parse_latency_ms(output: str) -> float:
+    match = re.search(r"time[=<]?\s*(\d+(?:\.\d+)?)\s*ms", output, re.IGNORECASE)
+    if not match:
+        return math.nan
+    value = float(match.group(1))
+    return value
+
+
 def ping_once(ip, timeout_sec):
     is_win = (os.name == "nt")
     if is_win:
@@ -241,20 +250,32 @@ def ping_once(ip, timeout_sec):
     else:
         cmd = ["ping", "-c", "1", "-W", str(int(timeout_sec)), ip]
     try:
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        return res.returncode == 0
+        res = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+        )
+        output = (res.stdout or "") + (res.stderr or "")
+        latency = parse_latency_ms(output)
+        if res.returncode != 0:
+            return False, math.nan
+        return True, latency
     except Exception:
-        return False
+        return False, math.nan
+
 
 def ping_check(ip, attempts=3, timeout_sec=2):
-    """Return (reachable: bool, fail_count: int) after multiple attempts."""
+    """Return (reachable: bool, fail_count: int, latency_ms: float) after multiple attempts."""
     fails = 0
     for _ in range(int(attempts)):
-        if ping_once(ip, timeout_sec):
-            return True, fails
-        else:
-            fails += 1
-    return False, fails
+        ok, latency = ping_once(ip, timeout_sec)
+        if ok:
+            return True, fails, latency
+        fails += 1
+    return False, fails, math.nan
 
 def now_ts():
     return datetime.datetime.now()
@@ -293,11 +314,16 @@ class NetworkMonitorApp:
         status_container = ttk.Frame(top_frame)
         status_container.pack(side="left")
 
-        self.stats_label = ttk.Label(status_container, text="", font=("Segoe UI", 9))
-        self.stats_label.pack(anchor="w")
-
-        self.status_label = ttk.Label(status_container, text="Initializing...", font=("Segoe UI", 13))
+        self.status_label = ttk.Label(status_container, text="Initializing...", font=("Segoe UI", 14, "bold"))
         self.status_label.pack(anchor="w")
+
+        self.summary_label = ttk.Label(status_container, text="", font=("Segoe UI", 9))
+        self.summary_label.pack(anchor="w", pady=(2, 0))
+
+        self.stats_frame = ttk.Frame(status_container)
+        self.stats_frame.pack(anchor="w", fill="x", pady=(6, 0))
+        self.stats_frame.columnconfigure(1, weight=1)
+        self.stat_rows = {}
 
         self.conn_type_label = ttk.Label(top_frame, text="", font=("Segoe UI", 10))
         self.conn_type_label.pack(side="left", padx=(12,0))
@@ -389,6 +415,13 @@ class NetworkMonitorApp:
         default_bottom = getattr(self.fig.subplotpars, "bottom", 0.11)
         self.figure_bottom_margin = max(default_bottom, 0.25)
         self.fig.subplots_adjust(bottom=self.figure_bottom_margin)
+        self.fig, (self.ax_status, self.ax_latency) = plt.subplots(
+            2,
+            1,
+            figsize=(10, 5.8),
+            sharex=True,
+            gridspec_kw={"height_ratios": [1.2, 1]},
+        )
         self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
         self.canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
 
@@ -427,7 +460,9 @@ class NetworkMonitorApp:
         # Data containers
         self.timestamps = deque()  # store datetime objects
         self.history = {}          # ip -> deque of 0/1
+        self.latency_history = {}  # ip -> deque of latency (ms)
         self.internet_series = deque()  # 0/1 for internet
+        self.internet_latency_series = deque()
         self.problem_flags = deque()
         self.internal_hops = []
         self.internet_ip = DEFAULT_INTERNET_FALLBACK
@@ -454,6 +489,9 @@ class NetworkMonitorApp:
 
         for ip in self.internal_hops:
             self.history[ip] = deque()
+            self.latency_history[ip] = deque()
+
+        self.build_stat_rows()
 
         # Initialize CSV header
         self.init_csv_header()
@@ -527,6 +565,32 @@ class NetworkMonitorApp:
             self.maintenance_weekday_combo.configure(state="readonly" if weekly else "disabled")
         except Exception:
             pass
+
+    def _create_stat_row(self, row_index, title):
+        label = ttk.Label(self.stats_frame, text=title, font=("Segoe UI", 9, "bold"))
+        label.grid(row=row_index, column=0, sticky="w", pady=1)
+
+        progress = ttk.Progressbar(self.stats_frame, maximum=100)
+        progress.grid(row=row_index, column=1, sticky="ew", padx=(8, 6), pady=1)
+
+        value = ttk.Label(self.stats_frame, text="—", font=("Segoe UI", 9))
+        value.grid(row=row_index, column=2, sticky="e", pady=1)
+
+        return {"label": label, "progress": progress, "value": value}
+
+    def build_stat_rows(self):
+        for child in self.stats_frame.winfo_children():
+            child.destroy()
+        self.stat_rows = {}
+
+        row = 0
+        for idx, ip in enumerate(self.internal_hops, start=1):
+            title = f"Hop {idx} ({ip})"
+            self.stat_rows[ip] = self._create_stat_row(row, title)
+            row += 1
+
+        title = f"Internet ({self.internet_ip})"
+        self.stat_rows["Internet"] = self._create_stat_row(row, title)
 
     def parse_maintenance_time(self):
         try:
@@ -632,7 +696,11 @@ class NetworkMonitorApp:
     def init_csv_header(self):
         with open(self.log_csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(["timestamp"] + self.internal_hops + ["Internet", "fail_count", "status"])
+            header = ["timestamp"]
+            for idx, ip in enumerate(self.internal_hops, start=1):
+                header.extend([f"hop{idx}_status_{ip}", f"hop{idx}_latency_ms"])
+            header.extend(["internet_status", "internet_latency_ms", "fail_count", "status"])
+            writer.writerow(header)
         self.csv_initialized = True
 
     # ---------- Pause/Resume ----------
@@ -661,6 +729,9 @@ class NetworkMonitorApp:
         self.timestamps = deque()
         for series in self.history.values():
             series.clear()
+        for series in self.latency_history.values():
+            series.clear()
+        self.internet_latency_series = deque()
         self.problem_flags = deque()
         self.clear_slider_markers()
 
@@ -685,6 +756,8 @@ class NetworkMonitorApp:
         # Re-detect route targets
         self.internal_hops, self.internet_ip = detect_route()
         self.history = {ip: deque() for ip in self.internal_hops}
+        self.latency_history = {ip: deque() for ip in self.internal_hops}
+        self.build_stat_rows()
 
         # Recreate CSV header for the new log files
         self.init_csv_header()
@@ -706,6 +779,7 @@ class NetworkMonitorApp:
         self.start_time = now_ts()
         self.total_measurements = 0
         self.internet_series = deque()
+        self.internet_latency_series = deque()
         self.problem_flags = deque()
         self.maintenance_active = False
         self.update_stats_label()
@@ -766,23 +840,27 @@ class NetworkMonitorApp:
             any_down = False
             total_fail = 0
             for ip in self.internal_hops:
-                ok, fails = ping_check(ip, attempts=attempts, timeout_sec=timeout)
+                ok, fails, latency = ping_check(ip, attempts=attempts, timeout_sec=timeout)
                 total_fail += fails
-                hop_results.append((ip, ok))
+                hop_results.append((ip, ok, latency))
                 if not ok:
                     any_down = True
 
             # Ping internet hop
-            internet_ok, inet_fails = ping_check(self.internet_ip, attempts=attempts, timeout_sec=timeout)
+            internet_ok, inet_fails, internet_latency = ping_check(
+                self.internet_ip, attempts=attempts, timeout_sec=timeout
+            )
             total_fail += inet_fails
             if not internet_ok:
                 any_down = True
 
             # Update series (prune >24h)
             self.timestamps.append(ts)
-            for ip, ok in hop_results:
+            for ip, ok, latency in hop_results:
                 self.history[ip].append(1 if ok else 0)
+                self.latency_history[ip].append(latency)
             self.internet_series.append(1 if internet_ok else 0)
+            self.internet_latency_series.append(internet_latency)
             self.problem_flags.append(1 if any_down else 0)
             self.prune_history()
             self.total_measurements += 1
@@ -792,7 +870,7 @@ class NetworkMonitorApp:
             status, color = self.classify(hop_results, internet_ok)
 
             # Log to files + console
-            line = self.log_line(ts, hop_results, internet_ok, total_fail, status)
+            line = self.log_line(ts, hop_results, internet_ok, internet_latency, total_fail, status)
             print(line)
             self.append_gui(line, color)
 
@@ -815,29 +893,47 @@ class NetworkMonitorApp:
             for ip in self.internal_hops:
                 if self.history[ip]:
                     self.history[ip].popleft()
+                if self.latency_history.get(ip):
+                    self.latency_history[ip].popleft()
             if self.internet_series:
                 self.internet_series.popleft()
+            if self.internet_latency_series:
+                self.internet_latency_series.popleft()
             if self.problem_flags:
                 self.problem_flags.popleft()
 
     def classify(self, hop_results, internet_ok):
-        all_internal_ok = all(ok for _, ok in hop_results)
+        all_internal_ok = all(ok for _, ok, _ in hop_results)
         first_hop_ok = hop_results[0][1] if hop_results else True
         if all_internal_ok and internet_ok:
             return "✅ All good — connection stable", "green"
         if not first_hop_ok:
             return "❌ First hop down — local LAN issue", "red"
-        for idx, (ip, ok) in enumerate(hop_results, start=1):
+        for idx, (ip, ok, _) in enumerate(hop_results, start=1):
             if not ok:
                 return f"🟠 Hop {idx} ({ip}) down — intermediate router issue", "orange"
         if not internet_ok:
             return "🔴 Internet down — ISP/DNS issue", "red"
         return "⚠️ Indeterminate state", "gray"
 
-    def log_line(self, ts, hop_results, internet_ok, fail_count, status):
+    def log_line(self, ts, hop_results, internet_ok, internet_latency, fail_count, status):
         human = fmt_time(ts)
-        parts = [f"{ip}:{'True' if ok else 'False'}" for ip, ok in hop_results]
-        line = f"[{human}] " + " | ".join(parts) + f" | Internet:{internet_ok} | fails:{fail_count} → {status}"
+        def pretty_latency(value):
+            if value is None:
+                return "—"
+            if isinstance(value, float) and math.isnan(value):
+                return "—"
+            return f"{value:.1f} ms"
+
+        parts = [
+            f"{ip}:{'True' if ok else 'False'} ({pretty_latency(latency)})"
+            for ip, ok, latency in hop_results
+        ]
+        line = (
+            f"[{human}] "
+            + " | ".join(parts)
+            + f" | Internet:{internet_ok} ({pretty_latency(internet_latency)}) | fails:{fail_count} → {status}"
+        )
         # TXT
         with open(self.log_txt_path, "a", encoding="utf-8") as f:
             f.write(line + "\n")
@@ -846,7 +942,21 @@ class NetworkMonitorApp:
             self.init_csv_header()
         with open(self.log_csv_path, "a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            row = [human] + [ok for _, ok in hop_results] + [internet_ok, fail_count, status]
+            row = [human]
+
+            for _, ok, latency in hop_results:
+                latency_value = ""
+                if latency is not None and not (isinstance(latency, float) and math.isnan(latency)):
+                    latency_value = f"{latency:.3f}"
+                row.extend([ok, latency_value])
+
+            inet_latency_value = ""
+            if internet_latency is not None and not (
+                isinstance(internet_latency, float) and math.isnan(internet_latency)
+            ):
+                inet_latency_value = f"{internet_latency:.3f}"
+
+            row.extend([internet_ok, inet_latency_value, fail_count, status])
             writer.writerow(row)
         return line
 
@@ -927,9 +1037,9 @@ class NetworkMonitorApp:
             self.time_slider.set_val(0.0)
 
     def update_plot(self):
-        self.ax.clear()
+        self.ax_status.clear()
+        self.ax_latency.clear()
 
-        # Convert timestamps to matplotlib date numbers for x-axis
         if not self.timestamps:
             self.canvas.draw()
             return
@@ -944,9 +1054,10 @@ class NetworkMonitorApp:
         window_delta = datetime.timedelta(minutes=window_min)
 
         t_all = list(self.timestamps)
+        t_min = t_all[0]
+        t_max = t_all[-1]
+
         index_list = self.get_page_indices(t_all)
-        history_lists = {ip: list(self.history[ip]) for ip in self.internal_hops}
-        internet_list = list(self.internet_series)
         flags_list = list(self.problem_flags)
 
         t_page = [t_all[idx] for idx in index_list]
@@ -954,9 +1065,12 @@ class NetworkMonitorApp:
             self.canvas.draw()
             return
 
-        history_page = {ip: [history_lists[ip][idx] for idx in index_list] for ip in self.internal_hops}
-        internet_page = [internet_list[idx] for idx in index_list]
-        flags_page = [flags_list[idx] for idx in index_list]
+        flags_page = []
+        for idx in index_list:
+            if idx < len(flags_list):
+                flags_page.append(flags_list[idx])
+            else:
+                flags_page.append(False)
 
         t_min = t_page[0]
         t_max = t_page[-1]
@@ -964,7 +1078,7 @@ class NetworkMonitorApp:
         computed_slider_min = ((t_min + window_delta) - t_max).total_seconds() / 60.0
         slider_min_minutes = min(0.0, computed_slider_min)
         if slider_min_minutes == 0.0:
-            slider_min_minutes = -1.0 / 60.0  # keep a non-zero span to avoid identical limits
+            slider_min_minutes = -1.0 / 60.0
 
         if (
             getattr(self.time_slider, "valmin", None) is None
@@ -978,15 +1092,12 @@ class NetworkMonitorApp:
         current_val = self.time_slider.val
         clamped_val = min(max(current_val, slider_min_minutes), 0.0)
         if clamped_val != current_val:
-            # set_val triggers update_plot; guard to avoid recursion loops
             self.time_slider.set_val(clamped_val)
             return
 
-        # Slider value (in minutes) shifts the end of the visible window relative to the latest point
         offset_minutes = self.time_slider.val
         end_time = t_max + datetime.timedelta(minutes=offset_minutes)
 
-        # Ensure end_time within available data range
         if end_time > t_max:
             end_time = t_max
         if end_time < t_min:
@@ -998,44 +1109,81 @@ class NetworkMonitorApp:
             end_time = t_max
             start_time = max(t_min, end_time - window_delta)
 
-        # Update slider value text to match clamped value
         if hasattr(self.time_slider, "valtext"):
             self.time_slider.valtext.set_text(f"{self.time_slider.val:.1f} min")
 
-        # Build x series (matplotlib expects numbers; but we can plot raw datetime if using autofmt)
-        # We'll filter data within [start_time, end_time]
-        def in_window(ts):
-            return start_time <= ts <= end_time
+        indices = [idx for idx, ts in enumerate(t_all) if start_time <= ts <= end_time]
+        if not indices:
+            indices = list(range(max(0, len(t_all) - 10), len(t_all)))
+            start_time = t_all[indices[0]]
+            end_time = t_all[indices[-1]]
 
-        t_vis = [ts for ts in t_page if in_window(ts)]
+        t_vis = [t_all[idx] for idx in indices]
         if not t_vis:
             # if no points in window, widen slightly around end
             t_vis = t_page[-min(len(t_page), 10):]
             start_time = t_vis[0]
             end_time = t_vis[-1]
 
-        # Plot internal hops
         for i, ip in enumerate(self.internal_hops):
-            series = history_page[ip]
-            y_vis = [val for ts, val in zip(t_page, series) if in_window(ts)]
             color = self.hop_colors[i % len(self.hop_colors)]
-            self.ax.plot(t_vis, y_vis, label=f"Hop {i+1} ({ip})", color=color, marker="o", linewidth=1.5)
+            status_values = list(self.history.get(ip, []))
+            latency_values = list(self.latency_history.get(ip, []))
 
-        # Plot internet (dashed)
-        y_inet = [val for ts, val in zip(t_page, internet_page) if in_window(ts)]
-        self.ax.plot(t_vis, y_inet, label="Internet", color="skyblue", linestyle="--", marker="o", linewidth=1.8)
+            status_series = [status_values[idx] for idx in indices if idx < len(status_values)]
 
-        self.ax.set_ylim(-0.1, 1.1)
-        self.ax.set_yticks([0, 1])
-        self.ax.set_yticklabels(["Down", "Up"])
-        # Move legend outside plot area (right side)
-        leg = self.ax.legend(
+            latency_series = []
+            for idx in indices:
+                if idx >= len(latency_values):
+                    latency_series.append(math.nan)
+                else:
+                    value = latency_values[idx]
+                    if value is None or (isinstance(value, float) and math.isnan(value)):
+                        latency_series.append(math.nan)
+                    else:
+                        latency_series.append(float(value))
+
+            label = f"Hop {i + 1} ({ip})"
+            self.ax_status.plot(t_vis, status_series, label=label, color=color, marker="o", linewidth=1.5)
+            self.ax_latency.plot(t_vis, latency_series, color=color, marker="o", linewidth=1.2, label="_nolegend_")
+
+        inet_status_values = list(self.internet_series)
+        inet_latency_values = list(self.internet_latency_series)
+        status_series = [inet_status_values[idx] for idx in indices if idx < len(inet_status_values)]
+
+        latency_series = []
+        for idx in indices:
+            if idx >= len(inet_latency_values):
+                latency_series.append(math.nan)
+            else:
+                value = inet_latency_values[idx]
+                if value is None or (isinstance(value, float) and math.isnan(value)):
+                    latency_series.append(math.nan)
+                else:
+                    latency_series.append(float(value))
+
+        self.ax_status.plot(
+            t_vis,
+            status_series,
+            label="Internet",
+            color=self.internet_color,
+            linestyle="--",
+            marker="o",
+            linewidth=1.8,
+        )
+        self.ax_latency.plot(t_vis, latency_series, color=self.internet_color, linestyle="--", marker="o", linewidth=1.4, label="_nolegend_")
+
+        self.ax_status.set_ylim(-0.1, 1.1)
+        self.ax_status.set_yticks([0, 1])
+        self.ax_status.set_yticklabels(["Down", "Up"])
+        self.ax_status.grid(axis="y", linestyle="--", alpha=0.3)
+        legend = self.ax_status.legend(
             loc="center left",
             bbox_to_anchor=(1.02, 0.5),
             borderaxespad=0,
-            framealpha=0.7,      # semi-transparent background
-            ncol=1,              # single column (avoid overlap)
-            title="Connections"
+            framealpha=0.7,
+            ncol=1,
+            title="Connecties",
         )
 
         # Make space on the right for legend while keeping the enlarged bottom
@@ -1044,24 +1192,28 @@ class NetworkMonitorApp:
         self.fig.subplots_adjust(right=0.8, bottom=bottom_margin)
         self.position_time_slider()
 
-        self.ax.set_title(f"Connection history ({len(self.internal_hops)} internal hop(s))")
-        self.ax.set_xlabel("Time")
-        self.ax.set_ylabel("Status (Up/Down)")
+        self.fig.subplots_adjust(right=0.8, hspace=0.25)
+
+        self.ax_status.set_title(f"Connectiviteit ({len(self.internal_hops)} interne hop(s))")
+        self.ax_status.set_ylabel("Status (Up/Down)")
+
+        self.ax_latency.set_title("Latency-overzicht")
+        self.ax_latency.set_ylabel("Latency (ms)")
+        self.ax_latency.grid(True, linestyle="--", alpha=0.3)
+        self.ax_latency.set_xlabel("Tijd")
+
         import matplotlib.dates as mdates
 
-        # Format x-axis time display
-        self.ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-        self.ax.xaxis.set_minor_formatter(mdates.DateFormatter('%d/%m\n%H:%M'))
+        self.ax_latency.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+        self.ax_latency.xaxis.set_minor_formatter(mdates.DateFormatter('%d/%m\n%H:%M'))
         self.fig.autofmt_xdate(rotation=45)
 
-
-        # Set x-limits to selected window
         x_left, x_right = start_time, end_time
         if x_left == x_right:
             pad = datetime.timedelta(seconds=30)
             x_left -= pad
             x_right += pad
-        self.ax.set_xlim(x_left, x_right)
+        self.ax_status.set_xlim(x_left, x_right)
 
         self.update_slider_markers(t_page, t_max, flags_page)
         self.canvas.draw_idle()
@@ -1086,7 +1238,9 @@ class NetworkMonitorApp:
         return " ".join(parts)
 
     def update_stats_label(self):
-        elapsed = now_ts() - self.start_time if hasattr(self, "start_time") and self.start_time else datetime.timedelta(0)
+        elapsed = (
+            now_ts() - self.start_time if hasattr(self, "start_time") and self.start_time else datetime.timedelta(0)
+        )
         elapsed_str = self.format_elapsed(elapsed)
         lines = [f"Measurements: {self.total_measurements} | Runtime: {elapsed_str}"]
 
@@ -1097,18 +1251,85 @@ class NetworkMonitorApp:
             up_pct = (up_count / total_count) * 100
             down_pct = 100 - up_pct
             return f"{up_pct:.1f}% up ({up_count}) / {down_pct:.1f}% down ({down_count})"
+        summary_parts = [f"Metingen: {self.total_measurements}", f"Tijd: {elapsed_str}"]
+
+        if self.timestamps:
+            summary_parts.append(f"Laatste meting: {fmt_time(self.timestamps[-1])}")
+
+        outages = sum(self.problem_flags) if self.problem_flags else 0
+        summary_parts.append(f"Storingen gedetecteerd: {outages}")
+
+        self.summary_label.config(text=" | ".join(summary_parts))
+
+        def sanitize_latency_values(values):
+            clean = []
+            for value in values:
+                if value is None:
+                    continue
+                if isinstance(value, float) and math.isnan(value):
+                    continue
+                clean.append(float(value))
+            return clean
+
+        def latest_latency(values):
+            for value in reversed(values):
+                if value is None:
+                    continue
+                if isinstance(value, float) and math.isnan(value):
+                    continue
+                return float(value)
+            return None
 
         for idx, ip in enumerate(self.internal_hops, start=1):
-            series = self.history.get(ip, [])
+            widgets = self.stat_rows.get(ip)
+            if not widgets:
+                continue
+
+            widgets["label"].config(text=f"Hop {idx} ({ip})")
+
+            series = list(self.history.get(ip, []))
             total = len(series)
             up = sum(series) if total else 0
-            lines.append(f"Hop {idx} ({ip}): {pct_text(up, total)}")
+            up_pct = (up / total * 100) if total else 0
+            widgets["progress"]["value"] = up_pct
 
-        total_inet = len(self.internet_series)
-        up_inet = sum(self.internet_series) if total_inet else 0
-        lines.append(f"Internet ({self.internet_ip}): {pct_text(up_inet, total_inet)}")
+            latency_series = list(self.latency_history.get(ip, []))
+            clean_latency = sanitize_latency_values(latency_series)
+            avg_latency = sum(clean_latency) / len(clean_latency) if clean_latency else None
+            latest = latest_latency(latency_series)
 
-        self.stats_label.config(text="\n".join(lines))
+            latency_bits = []
+            if avg_latency is not None:
+                latency_bits.append(f"avg {avg_latency:.1f} ms")
+            if latest is not None:
+                latency_bits.append(f"laatste {latest:.1f} ms")
+            latency_text = " | ".join(latency_bits) if latency_bits else "geen data"
+
+            widgets["value"].config(text=f"{up_pct:.1f}% up | {latency_text}")
+
+        inet_widgets = self.stat_rows.get("Internet")
+        if inet_widgets:
+            inet_widgets["label"].config(text=f"Internet ({self.internet_ip})")
+            inet_series = list(self.internet_series)
+            total = len(inet_series)
+            up = sum(inet_series) if total else 0
+            up_pct = (up / total * 100) if total else 0
+            inet_widgets["progress"]["value"] = up_pct
+
+            inet_latency_series = list(self.internet_latency_series)
+            clean_latency = sanitize_latency_values(inet_latency_series)
+            avg_latency = sum(clean_latency) / len(clean_latency) if clean_latency else None
+            latest = latest_latency(inet_latency_series)
+
+            latency_bits = []
+            if avg_latency is not None:
+                latency_bits.append(f"avg {avg_latency:.1f} ms")
+            if latest is not None:
+                latency_bits.append(f"laatste {latest:.1f} ms")
+            latency_text = " | ".join(latency_bits) if latency_bits else "geen data"
+
+            inet_widgets["value"].config(text=f"{up_pct:.1f}% up | {latency_text}")
+
         try:
             self.root.update_idletasks()
         except Exception:

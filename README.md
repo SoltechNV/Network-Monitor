@@ -4,8 +4,8 @@ Multi-hop Network Connectivity and Latency Visualizer
 ---
 
 ## Overview
-**Network Monitor** is a lightweight Python utility that continuously checks the connectivity between your computer, all internal network hops (routers, firewalls, modems), and the public Internet.  
-It displays real-time results in both a terminal and a graphical interface with dynamic charts and logging.
+**Network Monitor** is a lightweight Python utility that continuously checks the connectivity between your computer, all internal network hops (routers, firewalls, modems), and the public Internet.
+It displays real-time results in both a terminal and a graphical interface with dynamic charts (connectivity **and latency**) plus logging.
 
 Originally built for troubleshooting double-NAT and mesh Wi-Fi setups, it works equally well on simple single-router networks.
 
@@ -15,9 +15,10 @@ Originally built for troubleshooting double-NAT and mesh Wi-Fi setups, it works 
 - **Automatic hop detection** using PowerShell `Test-NetConnection` (Windows) or `traceroute` (Unix/macOS).
 - **Monitors all private IP hops** (e.g., 192.168.x.x, 10.x.x.x, 172.16–31.x.x).
 - **First public hop** (e.g., your ISP gateway) is treated as the *Internet*.
-- **Real-time graph**:
+- **Real-time graphs**:
   - Each internal hop in a unique color.
   - Internet link shown as a **light blue dashed line** (cloud color).
+  - Split view with **status** (up/down) history and **latency** timelines for every hop.
   - Live status updates (Up/Down) every few seconds.
 - **Console + GUI logging** with colored status messages.
 - **Automatic CSV/TXT logging** of all results.
@@ -91,13 +92,22 @@ Below is a recent capture of the Network Monitor interface in action.
 
 ## 🗂️ Log Files
 - `network_log_YYYY-MM-DD_HH-MM-SS.txt` — human-readable event log
-- `network_log_YYYY-MM-DD_HH-MM-SS.csv` — machine-readable data log for spreadsheets
+- `network_log_YYYY-MM-DD_HH-MM-SS.csv` — machine-readable data log for spreadsheets (status + latency columns)
 
 Fresh log files are created in the same directory as the script every time the
 application starts, and again whenever you press the **🔄 Reset** button. This
 keeps each monitoring session neatly separated.
 
 ---
+
+## 📊 Live Dashboard
+
+Every run shows a compact dashboard above the chart:
+
+- A bold live status banner with the latest classification (✅/❌/🟠/🔴/⚠️).
+- Measurement counters, elapsed time, and the timestamp of the last probe.
+- Per-hop progress bars highlighting uptime percentage, plus rolling average and last measured latency in milliseconds.
+- A dedicated Internet row so you can instantly compare LAN versus WAN health.
 
 ## 🧠 Status Indicators
 | Symbol | Meaning |
