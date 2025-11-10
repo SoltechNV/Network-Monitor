@@ -65,6 +65,23 @@ pip install matplotlib
 
 ---
 
+## ⚙️ Settings Panel
+Fine-tune how aggressively the monitor runs via the settings strip directly under the toolbar:
+
+- **Interval (sec)** – Delay between full hop scans. Lower values update the chart faster but run more traceroutes/pings.
+- **Attempts** – Number of probes the tool makes per hop before declaring it down.
+- **Timeout (sec)** – Maximum wait per attempt before considering that probe a failure.
+- **Fast retry (sec)** – Short polling window that activates automatically during an outage so the app can confirm recovery quickly.
+- **Window (min)** – Duration of history kept in the graph and slider. Increasing it lets you scroll further back in time.
+- **Maintenance** – Choose **Off**, **Daily**, or **Weekly** to mark scheduled maintenance windows:
+  - **Start (HH:MM)** defines when the window begins (24-hour format).
+  - **Duration (min)** controls how long maintenance mode suppresses outage alerts.
+  - **Weekday** becomes available for weekly schedules so you can pick the exact day.
+
+All selections are saved to `network_monitor_settings.json`, so your preferred cadence and maintenance windows load automatically the next time you start the app.
+
+---
+
 ## 🖼️ Example Screenshot
 Below is a recent capture of the Network Monitor interface in action.
 
