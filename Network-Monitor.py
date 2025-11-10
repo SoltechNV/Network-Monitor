@@ -1109,9 +1109,6 @@ class NetworkMonitorApp:
             start_time = t_vis[0]
             end_time = t_vis[-1]
 
-        def in_window(ts):
-            return start_time <= ts <= end_time
-
         for i, ip in enumerate(self.internal_hops):
             series = history_page[ip]
             y_vis = [val for ts, val in zip(t_page, series) if in_window(ts)]
