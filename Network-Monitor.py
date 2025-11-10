@@ -51,6 +51,116 @@ DEFAULT_INTERNET_FALLBACK = "1.1.1.1"
 
 IP_RE = re.compile(r"(\d+\.\d+\.\d+\.\d+)")
 
+LATENCY_THRESHOLDS = {
+    "lan": (10.0, 20.0),
+    "isp": (30.0, 60.0),
+    "internet": (50.0, 100.0),
+    "default": (50.0, 100.0),
+}
+
+LATENCY_ZONE_COLORS = {
+    "warning": "#FFF9C4",   # light yellow
+    "critical": "#F8D7DA",  # light red
+    "outage": "#FADBD8",   # softer red for severe outages
+}
+
+SEVERITY_ORDER = {"normal": 0, "warning": 1, "critical": 2, "outage": 3}
+
+
+def get_latency_thresholds(hop_name: str):
+    key = (hop_name or "").strip().lower()
+    if key in ("lan", "local", "hop1"):
+        key = "lan"
+    elif key in ("isp", "provider", "hop2"):
+        key = "isp"
+    elif key in ("internet", "wan", "cloudflare", "extra"):
+        key = "internet"
+    return LATENCY_THRESHOLDS.get(key, LATENCY_THRESHOLDS["default"])
+
+
+def classify_latency_value(value, hop_name: str):
+    if value is None:
+        return None
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(numeric_value, float) and math.isnan(numeric_value):
+        return None
+    warning_threshold, critical_threshold = get_latency_thresholds(hop_name)
+    if numeric_value >= critical_threshold:
+        return "critical"
+    if numeric_value >= warning_threshold:
+        return "warning"
+    return "normal"
+
+
+def get_latency_zones(data, hop_name):
+    segments = []
+    if not data:
+        return segments
+
+    valid_deltas = []
+    for idx in range(len(data) - 1):
+        current_ts = data[idx][0]
+        next_ts = data[idx + 1][0]
+        if current_ts is None or next_ts is None:
+            continue
+        delta = (next_ts - current_ts).total_seconds()
+        if delta > 0:
+            valid_deltas.append(delta)
+    if valid_deltas:
+        avg_delta = sum(valid_deltas) / len(valid_deltas)
+    else:
+        avg_delta = 60.0
+    avg_delta = max(5.0, min(avg_delta, 600.0))
+    default_step = datetime.timedelta(seconds=avg_delta)
+
+    def compute_bounds(start_idx, end_idx):
+        start_ts = data[start_idx][0]
+        end_ts = data[end_idx][0]
+        if start_ts is None or end_ts is None:
+            return None, None
+        if start_idx > 0 and data[start_idx - 1][0] is not None:
+            prev_ts = data[start_idx - 1][0]
+            start_ts = prev_ts + (start_ts - prev_ts) / 2
+        if end_idx + 1 < len(data) and data[end_idx + 1][0] is not None:
+            next_ts = data[end_idx + 1][0]
+            end_ts = end_ts + (next_ts - end_ts) / 2
+        else:
+            end_ts = end_ts + default_step
+        if end_ts <= start_ts:
+            end_ts = start_ts + datetime.timedelta(seconds=1)
+        return start_ts, end_ts
+
+    current_level = None
+    segment_start = None
+
+    for idx, (ts, latency, status_ok) in enumerate(data):
+        status_bool = None if status_ok is None else bool(status_ok)
+        level = None
+        if status_bool is False:
+            level = "outage"
+        else:
+            severity = classify_latency_value(latency, hop_name)
+            if severity in ("warning", "critical"):
+                level = severity
+
+        if level != current_level:
+            if current_level is not None and segment_start is not None:
+                seg_start_ts, seg_end_ts = compute_bounds(segment_start, idx - 1)
+                if seg_start_ts and seg_end_ts:
+                    segments.append((seg_start_ts, seg_end_ts, LATENCY_ZONE_COLORS[current_level]))
+            current_level = level
+            segment_start = idx if level is not None else None
+
+    if current_level is not None and segment_start is not None:
+        seg_start_ts, seg_end_ts = compute_bounds(segment_start, len(data) - 1)
+        if seg_start_ts and seg_end_ts:
+            segments.append((seg_start_ts, seg_end_ts, LATENCY_ZONE_COLORS[current_level]))
+
+    return segments
+
 # ---------------- Utility ----------------
 def run_cmd(cmd, timeout=None, shell=False):
     return subprocess.run(cmd if not shell else " ".join(cmd),
@@ -473,6 +583,8 @@ class NetworkMonitorApp:
         )
         self.time_slider.on_changed(self.on_slider_changed)
         self.position_time_slider()
+        self.slider_ax.set_yticks([])
+        self.slider_ax.set_ylim(-0.25, 1.05)
 
         # Data containers
         self.timestamps = deque()  # store datetime objects
@@ -483,6 +595,7 @@ class NetworkMonitorApp:
         self.extra_series = deque()
         self.extra_latency_series = deque()
         self.problem_flags = deque()
+        self.severity_history = deque()
         self.internal_hops = []
         self.internet_ip = DEFAULT_INTERNET_FALLBACK
         self.extra_target = None
@@ -495,6 +608,14 @@ class NetworkMonitorApp:
         self.total_measurements = 0
         self.page_dates = []
         self.current_page_index = 0
+        self.status_colors = {
+            "normal": "black",
+            "warning": "#8A6D3B",
+            "critical": "#B03A2E",
+            "outage": "#922B21",
+        }
+        self.status_current_severity = "normal"
+        self.status_recovery_streak = 0
 
         # Initialize log file paths (TXT + CSV will be timestamped)
         self.start_new_log_files()
@@ -706,7 +827,7 @@ class NetworkMonitorApp:
         elif not active and self.maintenance_active:
             self.maintenance_active = False
             self.append_gui("✅ Maintenance window ended — monitoring resumed", "green")
-            self.status_label.config(text="Monitoring...", foreground="black")
+            self.apply_status_override("Monitoring...", "black")
         return active
 
     def clear_slider_markers(self):
@@ -717,26 +838,82 @@ class NetworkMonitorApp:
                 pass
         self.problem_marker_artists = []
 
-    def update_slider_markers(self, all_timestamps, latest_ts, flags):
+    def update_slider_markers(self, all_timestamps, latest_ts, severities):
         self.clear_slider_markers()
-        if not all_timestamps or not flags:
+        count = min(len(all_timestamps), len(severities))
+        if count == 0:
             self.slider_ax.figure.canvas.draw_idle()
             return
 
-        offsets = []
-        for ts, flag in zip(all_timestamps, flags):
-            if flag:
-                offsets.append((ts - latest_ts).total_seconds() / 60.0)
+        timestamps = list(all_timestamps)[:count]
+        severity_values = list(severities)[:count]
 
-        if not offsets:
+        valid_deltas = []
+        for idx in range(len(timestamps) - 1):
+            delta = (timestamps[idx + 1] - timestamps[idx]).total_seconds()
+            if delta > 0:
+                valid_deltas.append(delta)
+        if valid_deltas:
+            avg_delta = sum(valid_deltas) / len(valid_deltas)
+        else:
+            avg_delta = 60.0
+        avg_delta = max(5.0, min(avg_delta, 600.0))
+        default_step = datetime.timedelta(seconds=avg_delta)
+
+        segments = []
+        current_level = None
+        segment_start = None
+        for idx, severity in enumerate(severity_values):
+            level = severity if severity in LATENCY_ZONE_COLORS else None
+            if level != current_level:
+                if current_level is not None and segment_start is not None:
+                    segments.append((segment_start, idx - 1, current_level))
+                current_level = level
+                segment_start = idx if level is not None else None
+        if current_level is not None and segment_start is not None:
+            segments.append((segment_start, len(timestamps) - 1, current_level))
+
+        if not segments:
             self.slider_ax.figure.canvas.draw_idle()
             return
 
-        scatter = self.slider_ax.scatter(offsets, [0.5] * len(offsets), color="red", s=40, zorder=5, clip_on=False)
-        self.problem_marker_artists.append(scatter)
-        for offset in offsets:
-            line = self.slider_ax.axvline(offset, color="red", ymin=0.15, ymax=0.85, alpha=0.5, linewidth=1)
-            self.problem_marker_artists.append(line)
+        def compute_bounds(start_idx, end_idx):
+            start_ts = timestamps[start_idx]
+            end_ts = timestamps[end_idx]
+            if start_idx > 0:
+                prev_ts = timestamps[start_idx - 1]
+                start_ts = prev_ts + (start_ts - prev_ts) / 2
+            if end_idx + 1 < len(timestamps):
+                next_ts = timestamps[end_idx + 1]
+                end_ts = end_ts + (next_ts - end_ts) / 2
+            else:
+                end_ts = end_ts + default_step
+            if end_ts <= start_ts:
+                end_ts = start_ts + datetime.timedelta(seconds=avg_delta)
+            return start_ts, end_ts
+
+        avg_delta_minutes = avg_delta / 60.0
+        min_width = max(avg_delta_minutes * 0.4, 0.08)
+
+        for start_idx, end_idx, level in segments:
+            seg_start, seg_end = compute_bounds(start_idx, end_idx)
+            if not seg_start or not seg_end:
+                continue
+            start_offset = (seg_start - latest_ts).total_seconds() / 60.0
+            end_offset = (seg_end - latest_ts).total_seconds() / 60.0
+            if math.isclose(start_offset, end_offset):
+                end_offset = start_offset + min_width
+            patch = self.slider_ax.axvspan(
+                start_offset,
+                end_offset,
+                ymin=-0.18,
+                ymax=-0.05,
+                color=LATENCY_ZONE_COLORS[level],
+                alpha=0.8,
+                zorder=6,
+                clip_on=False,
+            )
+            self.problem_marker_artists.append(patch)
         self.slider_ax.figure.canvas.draw_idle()
 
 
@@ -785,7 +962,7 @@ class NetworkMonitorApp:
         # Pause monitoring loop while we reset state
         self.paused = True
         self.pause_btn.config(text="▶ Resume")
-        self.status_label.config(text="Resetting monitor...", foreground="blue")
+        self.apply_status_override("Resetting monitor...", "blue")
         self.root.update_idletasks()
 
         # Give the monitor loop a moment to acknowledge pause
@@ -801,6 +978,7 @@ class NetworkMonitorApp:
         self.extra_latency_series = deque()
         self.internet_latency_series = deque()
         self.problem_flags = deque()
+        self.severity_history = deque()
         self.clear_slider_markers()
 
         # Clear GUI log
@@ -854,7 +1032,7 @@ class NetworkMonitorApp:
         )
         targets_msg = f"Targets → {', '.join(self.internal_hops)} → Internet={self.internet_ip}{extra_display}"
         self.append_gui(targets_msg)
-        self.status_label.config(text="Monitoring...", foreground="black")
+        self.apply_status_override("Monitoring...", "black")
         self.start_time = now_ts()
         self.total_measurements = 0
         self.internet_series = deque()
@@ -863,6 +1041,7 @@ class NetworkMonitorApp:
             self.extra_series = deque()
             self.extra_latency_series = deque()
         self.problem_flags = deque()
+        self.severity_history = deque()
         self.maintenance_active = False
         self.update_stats_label()
         self.paused = False
@@ -896,8 +1075,36 @@ class NetworkMonitorApp:
         if at_bottom:
             self.textbox.yview_moveto(1.0)  # only follow if we were already at bottom
         if color:
-            self.status_label.config(foreground=color, text=msg)
+            self.apply_status_override(msg, color)
         self.root.update_idletasks()
+
+    def apply_status_override(self, text, color):
+        self.status_current_severity = "normal"
+        self.status_recovery_streak = 2
+        self.status_label.config(foreground=color, text=text)
+
+    def update_status_indicator(self, text, severity):
+        severity = severity or "normal"
+        if severity not in SEVERITY_ORDER:
+            severity = "normal"
+
+        self.status_label.config(text=text)
+
+        if severity == "normal":
+            if self.status_current_severity != "normal":
+                self.status_recovery_streak += 1
+                if self.status_recovery_streak >= 2:
+                    self.status_current_severity = "normal"
+                    self.status_label.config(foreground=self.status_colors["normal"])
+            else:
+                self.status_recovery_streak = min(self.status_recovery_streak + 1, 2)
+                self.status_label.config(foreground=self.status_colors["normal"])
+            return
+
+        self.status_recovery_streak = 0
+        if self.status_current_severity != severity:
+            self.status_current_severity = severity
+        self.status_label.config(foreground=self.status_colors.get(severity, self.status_colors["warning"]))
 
     # ---------- Monitor loop ----------
     def monitor_loop(self):
@@ -963,7 +1170,14 @@ class NetworkMonitorApp:
             self.update_stats_label()
 
             # Classify
-            status, color = self.classify(hop_results, internet_ok, extra_result)
+            status, _ = self.classify(hop_results, internet_ok, extra_result)
+            severity = self.determine_overall_severity(
+                hop_results,
+                internet_ok,
+                internet_latency,
+                extra_result=extra_result,
+            )
+            self.severity_history.append(severity)
 
             # Log to files + console
             line = self.log_line(
@@ -976,7 +1190,8 @@ class NetworkMonitorApp:
                 extra_result=extra_result,
             )
             print(line)
-            self.append_gui(line, color)
+            self.append_gui(line)
+            self.update_status_indicator(status, severity)
 
             # Redraw plot
             self.update_plot()
@@ -1009,6 +1224,8 @@ class NetworkMonitorApp:
                 self.extra_latency_series.popleft()
             if self.problem_flags:
                 self.problem_flags.popleft()
+            if self.severity_history:
+                self.severity_history.popleft()
 
     def classify(self, hop_results, internet_ok, extra_result=None):
         all_internal_ok = all(ok for _, ok, _ in hop_results)
@@ -1028,6 +1245,41 @@ class NetworkMonitorApp:
         if all_internal_ok and internet_ok and (not extra_result or extra_result[1]):
             return "✅ All good — connection stable", "green"
         return "⚠️ Indeterminate state", "gray"
+
+    def determine_overall_severity(self, hop_results, internet_ok, internet_latency, extra_result=None):
+        severity = "normal"
+
+        def bump(level):
+            nonlocal severity
+            if level and SEVERITY_ORDER.get(level, 0) > SEVERITY_ORDER.get(severity, 0):
+                severity = level
+
+        for idx, (_, ok, latency) in enumerate(hop_results):
+            hop_name = "lan" if idx == 0 else "isp"
+            if not ok:
+                bump("outage")
+                continue
+            level = classify_latency_value(latency, hop_name)
+            if level in ("warning", "critical"):
+                bump(level)
+
+        if not internet_ok:
+            bump("outage")
+        else:
+            level = classify_latency_value(internet_latency, "internet")
+            if level in ("warning", "critical"):
+                bump(level)
+
+        if extra_result:
+            _, extra_ok, extra_latency = extra_result
+            if not extra_ok:
+                bump("outage")
+            else:
+                level = classify_latency_value(extra_latency, "extra")
+                if level in ("warning", "critical"):
+                    bump(level)
+
+        return severity
 
     def log_line(self, ts, hop_results, internet_ok, internet_latency, fail_count, status, extra_result=None):
         human = fmt_time(ts)
@@ -1191,19 +1443,19 @@ class NetworkMonitorApp:
         t_max = t_all[-1]
 
         index_list = self.get_page_indices(t_all)
-        flags_list = list(self.problem_flags)
+        severity_list = list(self.severity_history)
 
         t_page = [t_all[idx] for idx in index_list]
         if not t_page:
             self.canvas.draw()
             return
 
-        flags_page = []
+        severity_page = []
         for idx in index_list:
-            if idx < len(flags_list):
-                flags_page.append(flags_list[idx])
+            if idx < len(severity_list):
+                severity_page.append(severity_list[idx])
             else:
-                flags_page.append(False)
+                severity_page.append("normal")
 
         t_min = t_page[0]
         t_max = t_page[-1]
@@ -1276,6 +1528,25 @@ class NetworkMonitorApp:
                     else:
                         latency_series.append(float(value))
 
+            zone_data = []
+            for idx in indices:
+                ts_point = t_all[idx]
+                latency_val = latency_values[idx] if idx < len(latency_values) else None
+                status_val = status_values[idx] if idx < len(status_values) else None
+                zone_data.append((ts_point, latency_val, status_val))
+            hop_category = "lan" if i == 0 else "isp"
+            for start, end, zone_color in get_latency_zones(zone_data, hop_category):
+                clipped_start = max(start_time, start)
+                clipped_end = min(end_time, end)
+                if clipped_start < clipped_end:
+                    self.ax_latency.axvspan(
+                        clipped_start,
+                        clipped_end,
+                        color=zone_color,
+                        alpha=0.15,
+                        zorder=0,
+                    )
+
             label = f"Hop {i + 1} ({ip})"
             self.ax_status.plot(t_vis, status_series, label=label, color=color, marker="o", linewidth=1.5)
             self.ax_latency.plot(t_vis, latency_series, color=color, marker="o", linewidth=1.2, label="_nolegend_")
@@ -1294,6 +1565,24 @@ class NetworkMonitorApp:
                     latency_series.append(math.nan)
                 else:
                     latency_series.append(float(value))
+
+        inet_zone_data = []
+        for idx in indices:
+            ts_point = t_all[idx]
+            latency_val = inet_latency_values[idx] if idx < len(inet_latency_values) else None
+            status_val = inet_status_values[idx] if idx < len(inet_status_values) else None
+            inet_zone_data.append((ts_point, latency_val, status_val))
+        for start, end, zone_color in get_latency_zones(inet_zone_data, "internet"):
+            clipped_start = max(start_time, start)
+            clipped_end = min(end_time, end)
+            if clipped_start < clipped_end:
+                self.ax_latency.axvspan(
+                    clipped_start,
+                    clipped_end,
+                    color=zone_color,
+                    alpha=0.15,
+                    zorder=0,
+                )
 
         self.ax_status.plot(
             t_vis,
@@ -1321,6 +1610,24 @@ class NetworkMonitorApp:
                         latency_series.append(math.nan)
                     else:
                         latency_series.append(float(value))
+
+            extra_zone_data = []
+            for idx in indices:
+                ts_point = t_all[idx]
+                latency_val = extra_latency_values[idx] if idx < len(extra_latency_values) else None
+                status_val = extra_status_values[idx] if idx < len(extra_status_values) else None
+                extra_zone_data.append((ts_point, latency_val, status_val))
+            for start, end, zone_color in get_latency_zones(extra_zone_data, "extra"):
+                clipped_start = max(start_time, start)
+                clipped_end = min(end_time, end)
+                if clipped_start < clipped_end:
+                    self.ax_latency.axvspan(
+                        clipped_start,
+                        clipped_end,
+                        color=zone_color,
+                        alpha=0.15,
+                        zorder=0,
+                    )
 
             self.ax_status.plot(
                 t_vis,
@@ -1384,7 +1691,7 @@ class NetworkMonitorApp:
             x_right += pad
         self.ax_status.set_xlim(x_left, x_right)
 
-        self.update_slider_markers(t_page, t_max, flags_page)
+        self.update_slider_markers(t_page, t_max, severity_page)
         self.canvas.draw_idle()
 
     def position_time_slider(self):
