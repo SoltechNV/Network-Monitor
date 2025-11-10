@@ -290,7 +290,7 @@ def fmt_time(ts: datetime.datetime):
 class NetworkMonitorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Network Monitor — v3.6 Stable (24h, Slider, Pause)")
+        self.root.title("Network Monitor")
         self.root.geometry("1300x850")
 
         # State
