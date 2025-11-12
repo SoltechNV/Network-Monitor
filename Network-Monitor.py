@@ -585,6 +585,9 @@ class NetworkMonitorApp:
         self.position_time_slider()
         self.slider_ax.set_yticks([])
         self.slider_ax.set_ylim(-0.25, 1.05)
+        self.slider_ax.set_facecolor("#f8f9fb")
+        self.slider_marker_ymin = 0.08
+        self.slider_marker_ymax = 0.92
 
         # Data containers
         self.timestamps = deque()  # store datetime objects
@@ -895,6 +898,9 @@ class NetworkMonitorApp:
         avg_delta_minutes = avg_delta / 60.0
         min_width = max(avg_delta_minutes * 0.4, 0.08)
 
+        marker_ymin = getattr(self, "slider_marker_ymin", 0.05)
+        marker_ymax = getattr(self, "slider_marker_ymax", 0.95)
+
         for start_idx, end_idx, level in segments:
             seg_start, seg_end = compute_bounds(start_idx, end_idx)
             if not seg_start or not seg_end:
@@ -906,11 +912,11 @@ class NetworkMonitorApp:
             patch = self.slider_ax.axvspan(
                 start_offset,
                 end_offset,
-                ymin=-0.18,
-                ymax=-0.05,
+                ymin=marker_ymin,
+                ymax=marker_ymax,
                 color=LATENCY_ZONE_COLORS[level],
-                alpha=0.8,
-                zorder=6,
+                alpha=0.45,
+                zorder=2,
                 clip_on=False,
             )
             self.problem_marker_artists.append(patch)
