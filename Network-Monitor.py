@@ -622,11 +622,36 @@ class NetworkMonitorApp:
             valinit=0.0,
             valfmt="%0.1f min",
         )
+        # Harmonize slider styling with the rest of the UI (neutral greys)
+        slider_track_color = "#c6c7c9"
+        slider_handle_color = "#9a9c9f"
+        slider_edge_color = "#6f7174"
+        try:
+            # Matplotlib 3.5+: main filled region
+            if hasattr(self.time_slider, "poly") and self.time_slider.poly is not None:
+                self.time_slider.poly.set_facecolor(slider_track_color)
+                self.time_slider.poly.set_edgecolor(slider_track_color)
+            # Matplotlib 3.8+: dedicated track artist
+            if hasattr(self.time_slider, "track") and self.time_slider.track is not None:
+                self.time_slider.track.set_color(slider_track_color)
+            if hasattr(self.time_slider, "hline") and self.time_slider.hline is not None:
+                self.time_slider.hline.set_color(slider_track_color)
+            if hasattr(self.time_slider, "vline") and self.time_slider.vline is not None:
+                self.time_slider.vline.set_color(slider_edge_color)
+            if hasattr(self.time_slider, "handle") and self.time_slider.handle is not None:
+                self.time_slider.handle.set_facecolor(slider_handle_color)
+                self.time_slider.handle.set_edgecolor(slider_edge_color)
+                self.time_slider.handle.set_linewidth(1.0)
+            self.slider_ax.tick_params(colors=slider_edge_color)
+            self.time_slider.label.set_color(slider_edge_color)
+        except Exception:
+            # Styling is cosmetic; ignore issues caused by backend differences.
+            pass
         self.time_slider.on_changed(self.on_slider_changed)
         self.position_time_slider()
         self.slider_ax.set_yticks([])
         self.slider_ax.set_ylim(-0.25, 1.05)
-        self.slider_ax.set_facecolor("#f8f9fb")
+        self.slider_ax.set_facecolor("#f2f2f3")
         self.slider_marker_ymin = 0.08
         self.slider_marker_ymax = 0.92
 
