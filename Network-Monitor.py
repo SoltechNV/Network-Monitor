@@ -44,6 +44,13 @@ HISTORY_HOURS = 24 * MAX_HISTORY_DAYS
 DEFAULT_EXTRA_TARGET = "1.1.1.1"  # Optional extra host/IP to monitor (Cloudflare DNS)
 DEFAULT_EXTRA_LABEL = "Extra"
 
+DEFAULT_LAN_WARNING_MS = 10.0
+DEFAULT_LAN_CRITICAL_MS = 20.0
+DEFAULT_INTERNET_WARNING_MS = 50.0
+DEFAULT_INTERNET_CRITICAL_MS = 100.0
+DEFAULT_EXTRA_WARNING_MS = 50.0
+DEFAULT_EXTRA_CRITICAL_MS = 100.0
+
 LOG_BASENAME = "network_log"
 LOG_DIR = os.path.dirname(os.path.abspath(__file__))
 TRACEROUTE_TIMEOUT = 25
@@ -52,10 +59,11 @@ DEFAULT_INTERNET_FALLBACK = "1.1.1.1"
 IP_RE = re.compile(r"(\d+\.\d+\.\d+\.\d+)")
 
 LATENCY_THRESHOLDS = {
-    "lan": (10.0, 20.0),
+    "lan": (DEFAULT_LAN_WARNING_MS, DEFAULT_LAN_CRITICAL_MS),
     "isp": (30.0, 60.0),
-    "internet": (50.0, 100.0),
-    "default": (50.0, 100.0),
+    "internet": (DEFAULT_INTERNET_WARNING_MS, DEFAULT_INTERNET_CRITICAL_MS),
+    "extra": (DEFAULT_EXTRA_WARNING_MS, DEFAULT_EXTRA_CRITICAL_MS),
+    "default": (DEFAULT_INTERNET_WARNING_MS, DEFAULT_INTERNET_CRITICAL_MS),
 }
 
 LATENCY_ZONE_COLORS = {
@@ -73,8 +81,10 @@ def get_latency_thresholds(hop_name: str):
         key = "lan"
     elif key in ("isp", "provider", "hop2"):
         key = "isp"
-    elif key in ("internet", "wan", "cloudflare", "extra"):
+    elif key in ("internet", "wan", "cloudflare"):
         key = "internet"
+    elif key in ("extra", "custom", "secondary"):
+        key = "extra"
     return LATENCY_THRESHOLDS.get(key, LATENCY_THRESHOLDS["default"])
 
 
@@ -416,11 +426,27 @@ class NetworkMonitorApp:
         self.var_window_min = tk.IntVar(value=DEFAULT_WINDOW_MIN)
         self.var_extra_target = tk.StringVar(value=DEFAULT_EXTRA_TARGET)
         self.var_extra_label = tk.StringVar(value=DEFAULT_EXTRA_LABEL)
+        self.var_lan_warning = tk.DoubleVar(value=DEFAULT_LAN_WARNING_MS)
+        self.var_lan_critical = tk.DoubleVar(value=DEFAULT_LAN_CRITICAL_MS)
+        self.var_internet_warning = tk.DoubleVar(value=DEFAULT_INTERNET_WARNING_MS)
+        self.var_internet_critical = tk.DoubleVar(value=DEFAULT_INTERNET_CRITICAL_MS)
+        self.var_extra_warning = tk.DoubleVar(value=DEFAULT_EXTRA_WARNING_MS)
+        self.var_extra_critical = tk.DoubleVar(value=DEFAULT_EXTRA_CRITICAL_MS)
         self.var_maintenance_frequency = tk.StringVar(value="Off")
         self.var_maintenance_time = tk.StringVar(value="03:00")
         self.var_maintenance_duration = tk.IntVar(value=10)
         self.var_maintenance_weekday = tk.StringVar(value="Monday")
         self.load_settings()
+        for var in (
+            self.var_lan_warning,
+            self.var_lan_critical,
+            self.var_internet_warning,
+            self.var_internet_critical,
+            self.var_extra_warning,
+            self.var_extra_critical,
+        ):
+            var.trace_add("write", self._on_threshold_changed)
+        self.update_latency_thresholds()
 
         # Header: status + connection type + buttons
         top_frame = ttk.Frame(root)
@@ -481,6 +507,21 @@ class NetworkMonitorApp:
         ttk.Label(settings, text="Extra display name:").grid(row=1, column=10, sticky="w", padx=12, pady=4)
         self.extra_label_entry = ttk.Entry(settings, textvariable=self.var_extra_label, width=16)
         self.extra_label_entry.grid(row=1, column=11, sticky="w")
+
+        ttk.Label(settings, text="LAN warning (ms):").grid(row=2, column=0, sticky="w", padx=6, pady=4)
+        ttk.Spinbox(settings, from_=0, to=1000, increment=1, textvariable=self.var_lan_warning, width=6).grid(row=2, column=1, sticky="w")
+        ttk.Label(settings, text="LAN critical (ms):").grid(row=2, column=2, sticky="w", padx=12, pady=4)
+        ttk.Spinbox(settings, from_=0, to=2000, increment=1, textvariable=self.var_lan_critical, width=6).grid(row=2, column=3, sticky="w")
+
+        ttk.Label(settings, text="Internet warning (ms):").grid(row=2, column=4, sticky="w", padx=12, pady=4)
+        ttk.Spinbox(settings, from_=0, to=1000, increment=1, textvariable=self.var_internet_warning, width=6).grid(row=2, column=5, sticky="w")
+        ttk.Label(settings, text="Internet critical (ms):").grid(row=2, column=6, sticky="w", padx=12, pady=4)
+        ttk.Spinbox(settings, from_=0, to=2000, increment=1, textvariable=self.var_internet_critical, width=6).grid(row=2, column=7, sticky="w")
+
+        ttk.Label(settings, text="Extra warning (ms):").grid(row=2, column=8, sticky="w", padx=12, pady=4)
+        ttk.Spinbox(settings, from_=0, to=1000, increment=1, textvariable=self.var_extra_warning, width=6).grid(row=2, column=9, sticky="w")
+        ttk.Label(settings, text="Extra critical (ms):").grid(row=2, column=10, sticky="w", padx=12, pady=4)
+        ttk.Spinbox(settings, from_=0, to=2000, increment=1, textvariable=self.var_extra_critical, width=6).grid(row=2, column=11, sticky="w")
 
         ttk.Label(settings, text="Maintenance:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
         self.maintenance_mode_combo = ttk.Combobox(
@@ -676,6 +717,17 @@ class NetworkMonitorApp:
             try:
                 with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                def set_float(var, key):
+                    if key not in data:
+                        return
+                    value = data.get(key)
+                    if isinstance(value, (int, float)):
+                        var.set(float(value))
+                    elif isinstance(value, str):
+                        try:
+                            var.set(float(value))
+                        except ValueError:
+                            pass
                 self.var_interval.set(data.get("interval", self.var_interval.get()))
                 self.var_attempts.set(data.get("attempts", self.var_attempts.get()))
                 self.var_timeout.set(data.get("timeout", self.var_timeout.get()))
@@ -699,12 +751,19 @@ class NetworkMonitorApp:
                 extra_label_val = data.get("extra_label", self.var_extra_label.get())
                 if isinstance(extra_label_val, str):
                     self.var_extra_label.set(extra_label_val)
+                set_float(self.var_lan_warning, "lan_warning")
+                set_float(self.var_lan_critical, "lan_critical")
+                set_float(self.var_internet_warning, "internet_warning")
+                set_float(self.var_internet_critical, "internet_critical")
+                set_float(self.var_extra_warning, "extra_warning")
+                set_float(self.var_extra_critical, "extra_critical")
                 print("⚙️ Settings loaded from file.")
             except Exception as e:
                 print(f"⚠️ Could not load settings: {e}")
-    
+
     def save_settings(self):
         """Save current settings to JSON file."""
+        self.update_latency_thresholds()
         data = {
             "interval": self.var_interval.get(),
             "attempts": self.var_attempts.get(),
@@ -713,6 +772,12 @@ class NetworkMonitorApp:
             "window_min": self.var_window_min.get(),
             "extra_target": self.var_extra_target.get(),
             "extra_label": self.var_extra_label.get(),
+            "lan_warning": self.var_lan_warning.get(),
+            "lan_critical": self.var_lan_critical.get(),
+            "internet_warning": self.var_internet_warning.get(),
+            "internet_critical": self.var_internet_critical.get(),
+            "extra_warning": self.var_extra_warning.get(),
+            "extra_critical": self.var_extra_critical.get(),
             "maintenance_frequency": self.var_maintenance_frequency.get(),
             "maintenance_time": self.var_maintenance_time.get(),
             "maintenance_duration": self.var_maintenance_duration.get(),
@@ -724,6 +789,53 @@ class NetworkMonitorApp:
             print("💾 Settings saved.")
         except Exception as e:
             print(f"⚠️ Could not save settings: {e}")
+
+    def _on_threshold_changed(self, *_):
+        self.update_latency_thresholds()
+
+    def update_latency_thresholds(self):
+        def sanitize(var, default):
+            try:
+                value = float(var.get())
+            except (tk.TclError, TypeError, ValueError):
+                value = default
+            if value < 0:
+                value = 0.0
+            try:
+                current = float(var.get())
+            except (tk.TclError, TypeError, ValueError):
+                current = None
+            if current != value:
+                var.set(value)
+            return value
+
+        def ensure_order(warn_value, crit_value, crit_var):
+            if crit_value < warn_value:
+                crit_value = warn_value
+                try:
+                    current = float(crit_var.get())
+                except (tk.TclError, TypeError, ValueError):
+                    current = None
+                if current != crit_value:
+                    crit_var.set(crit_value)
+            return warn_value, crit_value
+
+        lan_warn = sanitize(self.var_lan_warning, DEFAULT_LAN_WARNING_MS)
+        lan_crit = sanitize(self.var_lan_critical, DEFAULT_LAN_CRITICAL_MS)
+        lan_warn, lan_crit = ensure_order(lan_warn, lan_crit, self.var_lan_critical)
+
+        inet_warn = sanitize(self.var_internet_warning, DEFAULT_INTERNET_WARNING_MS)
+        inet_crit = sanitize(self.var_internet_critical, DEFAULT_INTERNET_CRITICAL_MS)
+        inet_warn, inet_crit = ensure_order(inet_warn, inet_crit, self.var_internet_critical)
+
+        extra_warn = sanitize(self.var_extra_warning, DEFAULT_EXTRA_WARNING_MS)
+        extra_crit = sanitize(self.var_extra_critical, DEFAULT_EXTRA_CRITICAL_MS)
+        extra_warn, extra_crit = ensure_order(extra_warn, extra_crit, self.var_extra_critical)
+
+        LATENCY_THRESHOLDS["lan"] = (lan_warn, lan_crit)
+        LATENCY_THRESHOLDS["internet"] = (inet_warn, inet_crit)
+        LATENCY_THRESHOLDS["extra"] = (extra_warn, extra_crit)
+        LATENCY_THRESHOLDS["default"] = (inet_warn, inet_crit)
 
     def update_maintenance_widgets(self):
         mode = self.var_maintenance_frequency.get()
